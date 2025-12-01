@@ -23,8 +23,7 @@ def main():
     
     # Create a simple data stream from a collection
     data_stream = env.from_collection(
-        collection=["Hello", "World", "from", "Apache", "Flink!"],
-        type_info=None  # Let Flink infer the type
+        collection=["Hello", "World", "from", "Apache", "Flink!"]
     )
     
     # Map each element to a greeting message and print
