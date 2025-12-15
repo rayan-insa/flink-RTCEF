@@ -17,6 +17,7 @@ This project integrates the [RTCEF framework](https://github.com/manospits/rtcef
 Complex Event Forecasting (CEF) is the process of predicting complex events of interest over a stream of simple events. Unlike Complex Event Recognition (CER) which detects events reactively, CEF enables **proactive measures** by anticipating future occurrences with a degree of certainty.
 
 **Real-world applications include:**
+
 - 🚢 **Maritime Situational Awareness**: Forecasting vessel arrivals at ports for better resource management
 - 💳 **Financial Fraud Detection**: Anticipating fraudulent transaction patterns before they complete
 - 🏭 **Industrial IoT**: Predicting equipment failures or process anomalies
@@ -24,6 +25,7 @@ Complex Event Forecasting (CEF) is the process of predicting complex events of i
 ### The Challenge
 
 CEF systems rely on probabilistic models trained on historical data. However, our world is constantly evolving:
+
 - Maritime vessels adapt routes based on weather conditions
 - Fraudsters evolve their tactics to avoid detection
 - Operational patterns shift due to seasonal or external factors
@@ -108,29 +110,7 @@ The RTCEF framework consists of five synergistic services communicating over Kaf
 
 ### Flink-RTCEF Target Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    APACHE FLINK CLUSTER                             │
-├─────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐             │
-│  │   Source    │───►│  CEF Engine │───►│    Sink     │             │
-│  │  (Kafka)    │    │  Operator   │    │  (Kafka)    │             │
-│  └─────────────┘    └──────┬──────┘    └─────────────┘             │
-│                            │                                        │
-│                     ┌──────▼──────┐                                 │
-│                     │  Broadcast  │                                 │
-│                     │   State     │                                 │
-│                     │  (Models)   │                                 │
-│                     └──────▲──────┘                                 │
-│                            │                                        │
-│  ┌─────────────┐    ┌──────┴──────┐    ┌─────────────┐             │
-│  │  Collector  │───►│  Optimizer  │───►│   Factory   │             │
-│  │  Operator   │    │  Operator   │    │  Operator   │             │
-│  └─────────────┘    └─────────────┘    └─────────────┘             │
-├─────────────────────────────────────────────────────────────────────┤
-│                    Checkpointing & State Backend                    │
-└─────────────────────────────────────────────────────────────────────┘
-```
+...
 
 ---
 
@@ -138,47 +118,50 @@ The RTCEF framework consists of five synergistic services communicating over Kaf
 
 ### Prerequisites
 
-- Python 3.9+
-- Java 11+ (for Flink runtime)
-- Apache Kafka (for messaging)
-- Docker (optional, for local Kafka setup)
+- **Java 8 (JDK 1.8)**: Required for building/running Wayeb (Scala component).
+- **Java 17 (JDK 17)**: Required for the Flink application.
+- **Maven**: For building the Flink Java application.
+- **SBT**: For building Wayeb.
+- **Make**: To run the automated workflow.
+
+> **Note**: On macOS/Linux, the `Makefile` attempts to auto-detect JDK paths. You can override them if detection fails or for custom setups:
+>
+> ```bash
+> make build JAVA8_HOME="/usr/lib/jvm/java-8" JAVA17_HOME="/usr/lib/jvm/java-17"
+> ```
 
 ### Installation
 
-```bash
-# Clone the repository
-git clone https://github.com/rayan-insa/flink-RTCEF.git
-cd flink-RTCEF
+1. Clone the repository:
 
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+    ```bash
+    git clone https://github.com/your-username/flink-RTCEF.git
+    cd flink-RTCEF
+    ```
 
-# Install dependencies
-pip install apache-flink
-```
+2. Check your environment:
+
+    ```bash
+    make check-env
+    ```
+
+    *Ensure both Java 8 and 17 are detected.*
 
 ### Quick Start
 
-```python
-# hello_world.py - Verify PyFlink installation
-from pyflink.datastream import StreamExecutionEnvironment
-
-def main():
-    env = StreamExecutionEnvironment.get_execution_environment()
-    data_stream = env.from_collection(
-        collection=["Hello", "World", "from", "Apache", "Flink!"]
-    )
-    data_stream.map(lambda x: f"Message: {x}").print()
-    env.execute("Hello World PyFlink Job")
-
-if __name__ == "__main__":
-    main()
-```
+To build everything and run the end-to-end smoke test:
 
 ```bash
-python hello_world.py
+make build smoke
 ```
+
+This command will:
+
+1. Compile Wayeb (using Java 8).
+2. Compile the Flink App (using Java 17).
+3. Run a recognition test on a sample stream.
+
+If successful, you should see `--- Smoke Test Passed ---`.
 
 ---
 
@@ -207,22 +190,7 @@ $$MCC = \sqrt{Precision \times Recall \times Specificity \times NPV} - \sqrt{FDR
 
 ## 🗂️ Project Structure
 
-```
-flink-RTCEF/
-├── README.md
-├── LICENSE
-├── requirements.txt
-├── hello_world.py          # PyFlink verification script
-├── src/
-│   ├── engine/             # CEF engine operators
-│   ├── collector/          # Data collection operators
-│   ├── observer/           # Performance monitoring
-│   ├── controller/         # Optimization orchestration
-│   └── factory/            # Model training
-├── configs/                # Configuration files
-├── tests/                  # Unit and integration tests
-└── docs/                   # Additional documentation
-```
+...
 
 ---
 
