@@ -1,7 +1,9 @@
 # Flink-RTCEF
 
-[![Apache Flink](https://img.shields.io/badge/Apache%20Flink-2.1+-E6526F?style=flat&logo=apache-flink&logoColor=white)](https://flink.apache.org/)
+[![Apache Flink](https://img.shields.io/badge/Apache%20Flink-17.2-E6526F?style=flat&logo=apache-flink&logoColor=white)](https://flink.apache.org/)
 [![Python](https://img.shields.io/badge/Python-3.9+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Java](https://img.shields.io/badge/Java-11-ffa500?style=flat&logo=java&logoColor=white)](https://www.java.com)
+[![Scala](https://img.shields.io/badge/Scala-2.12-a52a2a?style=flat&logo=java&logoColor=white)](https://www.scala-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 > **Flink-based adaptation of the RTCEF (Run-Time Adaptation for Complex Event Forecasting) framework**
@@ -108,9 +110,34 @@ The RTCEF framework consists of five synergistic services communicating over Kaf
             └───────────────┘
 ```
 
-### Flink-RTCEF Target Architecture
+### Engine Architecture
 
-...
+The system follows a "Wrapper Pattern" where Flink handles the distributed stream processing and state management, while Wayeb handles the complex event logic.
+
+| Component | Technology | Responsibility |
+|-------------| ------------- | -------------|
+|Stream Runner| Apache Flink (Java 11) | Reads CSV streams, partitions data by key (e.g., mmsi), and manages fault tolerance (State Backends). |
+| Core Engine | Wayeb (Scala 2.12) | Implements the Finite State Machine (FSM) and Probabilistic Suffix Trees (PST) for detection and forecasting. |
+| Bridge | FlinkEngine.java | A KeyedProcessFunction that initializes Wayeb lazily on workers and bridges Flink State to Wayeb's internal memory. |
+
+**How It Works**:
+
+> **_IMPORTANT:_** The ``Makefile`` allows to compile and train a sample model (**Training Phase**) to test the runtime phase but in practice, the initial training should be handled by the overall system.
+
+1. **Training Phase (Offline)**: 
+   - **Compile**: Converts Symbolic Regular Expressions (``.sre``) into a Symbolic Finite Automaton (``.spst``).
+
+   - **Learn (MLE)**: Replays historical streams to learn transition probabilities, generating a Markov Chain model (``.spst.mc``).
+
+2. **Runtime Phase (Online)**:
+
+   - **Ingest**: Flink reads the live data stream.
+
+   - **Detect**: The Run.scala engine consumes events and advances the state machine.
+
+   - **Forecast**: Upon every state change, the ``ForecasterRun`` calculates the probability of reaching a final state within a specific horizon (e.g., 30 steps).
+
+   - **Alert**: If the probability exceeds a threshold (e.g., ``0.5``), an alert is emitted.
 
 ---
 
@@ -118,50 +145,71 @@ The RTCEF framework consists of five synergistic services communicating over Kaf
 
 ### Prerequisites
 
-- **Java 8 (JDK 1.8)**: Required for building/running Wayeb (Scala component).
-- **Java 17 (JDK 17)**: Required for the Flink application.
+- **Docker & Docker Compose** : Required for running the Flink Cluster
+- **Java 11** : Required for Flink 1.17 compatibility
 - **Maven**: For building the Flink Java application.
 - **SBT**: For building Wayeb.
 - **Make**: To run the automated workflow.
 
-> **Note**: On macOS/Linux, the `Makefile` attempts to auto-detect JDK paths. You can override them if detection fails or for custom setups:
+> **_NOTE:_**: On macOS/Linux, the `Makefile` attempts to auto-detect JDK paths. You can override them if detection fails or for custom setups:
 >
 > ```bash
-> make build JAVA8_HOME="/usr/lib/jvm/java-8" JAVA17_HOME="/usr/lib/jvm/java-17"
+> make build JAVA_HOME="/usr/lib/jvm/java-11"
 > ```
 
-### Installation
+### Installation & Quick Start
 
-1. Clone the repository:
-
-    ```bash
-    git clone https://github.com/your-username/flink-RTCEF.git
-    cd flink-RTCEF
-    ```
-
-2. Check your environment:
-
-    ```bash
-    make check-env
-    ```
-
-    *Ensure both Java 8 and 17 are detected.*
-
-### Quick Start
-
-To build everything and run the end-to-end smoke test:
+**1. Clone the repository:**
 
 ```bash
-make build smoke
+git clone https://github.com/your-username/flink-RTCEF.git
+cd flink-RTCEF
+```
+
+**2. Start the Flink Cluster:**
+
+```bash
+make start
+```
+
+The Flink Cluster UI should be available at http://localhost:8081. It is useful to check logs and graphs of each Flink jobs.
+
+**3. Run the project**
+
+```bash
+make run
 ```
 
 This command will:
 
-1. Compile Wayeb (using Java 8).
-2. Compile the Flink App (using Java 17).
-3. Run a recognition test on a sample stream.
+1. Check if everything is installed.
+2. Build Wayeb using SBT.
+3. Build the Flink App using Maven.
+4. Compile an automaton from a given pattern and learn a predictive model from the given sample maritime dataset
+5. Upload the Flink Job to the Cluster and run the Job
 
-If successful, you should see `--- Smoke Test Passed ---`.
+> **_IMPORTANT:_**: For now, this command is training a prediction model over sample maritime data and predicting over the SAME data. This is just for illustration purposes.
+
+> **_NOTE:_**: To bypass re-building and re-training Wayeb each time when testing Java code only, use **make build-flink** followed by **make submit** to build only Flin Java code and submit it to the Cluster.
+
+
+**4. Show forecast logs**
+
+```bash
+make logs
+```
+
+**5. Stop everything**
+
+```bash
+make stop
+```
+
+> **_NOTE:_**: You can always run ``make help`` to see available commands:
+>
+> ```bash
+> make help
+> ```
 
 ---
 
@@ -190,8 +238,21 @@ $$MCC = \sqrt{Precision \times Recall \times Specificity \times NPV} - \sqrt{FDR
 
 ## 🗂️ Project Structure
 
-...
-
+```
+.
+├── docs/                    # Documentation of the project
+├── Wayeb/                   # The Scala Core Library (Sub-module)
+│   ├── cef/                 # Main logic (Detection/Forecasting)
+│   └── patterns/            # Pattern definitions (.sre files)
+├── java/                    # The Flink Application
+│   ├── src/main/java/       # Flink Jobs (FlinkWayebJob, FlinkEngine)
+│   └── pom.xml              # Dependencies (Flink 1.17.2)
+├── data/                    # Shared volume for Docker
+│   └── save_models/         # Model saved during the different phases
+├── docker-compose.yaml      # Flink Cluster (JobManager + TaskManager)
+├── Makefile                 # Orchestration scripts
+└── README.md
+```
 ---
 
 ## 📖 References
@@ -206,6 +267,12 @@ $$MCC = \sqrt{Precision \times Recall \times Specificity \times NPV} - \sqrt{FDR
 ## 👥 Authors
 
 This project is developed as part of the **Data System Research** module, a final year Computer Science course at **INSA Lyon**, supervised by **Riccardo Tommasini**.
+
+**Lizhi Zhang** - lizhi.zhang@insa-lyon.fr \
+**Rayan Hanader** - rayan.hanader@insa-lyon.fr \
+**Shuyan Dou** - shuyan.dou@insa-lyon.fr \
+**Remi Vialleton** - remi.vialleton@insa-lyon.fr
+
 
 ---
 
