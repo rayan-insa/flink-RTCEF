@@ -260,3 +260,6 @@ out/
 
 # Flink
 log/.work/
+
+# Data
+data/saved_models/
