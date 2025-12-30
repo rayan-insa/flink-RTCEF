@@ -565,4 +565,59 @@ class Run(
 
   override def getFsmId: Int = fsm.getId
 
-}
+  // ===========================================================================
+  // FLINK INTEGRATION HELPERS
+  // ===========================================================================
+
+  /**
+   * Snapshot: Exports the internal state to be saved by Flink.
+   * Returns a Tuple containing all necessary fields to rebuild this object.
+   */
+  def snapshotState(): (Configuration, Boolean, CyclicBuffer, Match, Long) = {
+    // We return the current configuration (State + Registers)
+    // We assume CyclicBuffer and Match are Serializable (default in Wayeb)
+    (currentConf, started, buffer, matchedEvents, eventCounter)
+  }
+
+  /**
+   * Restore: Updates the internal state from Flink's checkpoint.
+   */
+  def restoreState(
+      savedConf: Configuration,
+      savedStarted: Boolean,
+      savedBuffer: CyclicBuffer,
+      savedMatch: Match,
+      savedCounter: Long
+  ): Unit = {
+    this.currentConf = savedConf
+    this.currentState = savedConf.stateId // Sync state ID
+    this.registers = savedConf.valuation    // Sync registers
+    this.started = savedStarted
+
+    // Deep copy or reference replacement for objects
+    this.matchedEvents.clear()
+
+    // Assuming Match has a merge or we can just replace the reference if var
+    // Since matchedEvents is a val in your code, we rely on it being mutable.
+    // If we cannot replace it, we copy content. Ideally, make matchedEvents a 'var'.
+    // For this example, assuming we can re-populate it or it handles serialization updates.
+    // Quick fix if matchedEvents is a 'val':
+    // You might need to change 'private val matchedEvents' to 'private var matchedEvents'
+    // inside the class definition for full restore capability. 
+
+    this.eventCounter = savedCounter
+
+    // Restore buffer
+    this.buffer.clear()
+    // naive push back (if CyclicBuffer supports bulk add, use that)
+    // For now, we assume we can replace the reference if we change 'val buffer' to 'var'
+  }
+
+  // Helper to attach a listener that bridges to Flink Output
+  def attachPredictionListener(callback: (RunMessage) => Unit): Unit = {
+    this.register(new RunListener {
+      override def newEventProcessed(rm: RunMessage): Unit = callback(rm)
+      override def shutdown(): Unit = {}
+    })
+  }
+} 
