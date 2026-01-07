@@ -24,7 +24,7 @@ class MockDatasetProducer:
     Mock producer that simulates Collector sending datasets
     """
     
-    def __init__(self, bootstrap_servers: str = 'localhost:9092', topic: str = 'datasets'):
+    def __init__(self, bootstrap_servers: str = 'kafka:29092', topic: str = 'datasets'):
         """
         Initialize the mock producer
         
@@ -44,7 +44,8 @@ class MockDatasetProducer:
         dataset_id: str,
         events: List[Dict[str, Any]],
         model_id: str = "maritime_model_v1",
-        metadata: Dict[str, Any] = None
+        metadata: Dict[str, Any] = None,
+        uri: str = "/opt/flink/data/mock_training_dataset.json"  # Mock CSV dataset (maritime format)
     ):
         """
         Send a mock dataset to Kafka
@@ -54,6 +55,7 @@ class MockDatasetProducer:
             events: List of events in the dataset
             model_id: Associated model ID
             metadata: Additional metadata
+            uri: Path to the dataset file (Simulated)
         """
         # Ensure metadata contains model_id for keying
         if metadata is None:
@@ -64,7 +66,8 @@ class MockDatasetProducer:
             dataset_id=dataset_id,
             timestamp=int(time.time() * 1000),
             events=events,
-            metadata=metadata
+            metadata=metadata,
+            uri=uri
         )
         
         # Serialize to JSON
@@ -72,7 +75,8 @@ class MockDatasetProducer:
             'dataset_id': dataset.dataset_id,
             'timestamp': dataset.timestamp,
             'events': dataset.events,
-            'metadata': dataset.metadata
+            'metadata': dataset.metadata,
+            'uri': dataset.uri
         }
         
         # Send to Kafka

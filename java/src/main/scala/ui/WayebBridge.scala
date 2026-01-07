@@ -24,7 +24,8 @@ object WayebBridge {
       pMin = pMin,
       gammaMin = gamma,
       alpha = alpha,
-      r = r
+      r = r,
+      domainSpecificStream = "json"
     )
     
     BeepBeep.runLearnSPST(config)

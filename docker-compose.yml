@@ -9,6 +9,7 @@ services:
       - "8081:8081"
     command: jobmanager
     environment:
+      - PYTHONPATH=/opt/flink/python_code
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
@@ -29,6 +30,7 @@ services:
     command: taskmanager
     scale: 1
     environment:
+      - PYTHONPATH=/opt/flink/python_code
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager

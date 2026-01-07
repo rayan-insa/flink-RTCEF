@@ -3,10 +3,11 @@ PyFlink Controller Job - Main Entry Point
 
 Orchestrates model optimization and re-training based on:
 - Instructions from Observer (Kafka: topic 'instructions')
-- Datasets from Collector (Kafka: topic 'datasets')
 
 Outputs:
-- Updated models (Kafka: topic 'model-updates')
+- Commands for Factory (Kafka: topic 'factory_commands')
+
+Note: Datasets are consumed directly by the Factory, NOT by the Controller.
 """
 
 from pyflink.datastream import StreamExecutionEnvironment
@@ -18,13 +19,13 @@ from pyflink.datastream.connectors.kafka import (
 )
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common.typeinfo import Types
+from pyflink.common.watermark_strategy import WatermarkStrategy
 
 import logging
 import sys
 
-from controller_job.functions.controller_coprocess import ControllerCoProcessFunction
+from controller_job.functions.controller_process import ControllerProcessFunction
 from controller_job.models.instruction import Instruction
-from controller_job.models.dataset import TrainingDataset
 
 
 # Configure logging
@@ -98,95 +99,65 @@ def main():
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)  # Start with single parallelism for simplicity
     
-    # Configure for Kafka sources/sinks
-    # These JARs are required for Kafka connectors
-    # Note: In production, these should be in the Flink lib/ folder or submitted with the job
-    # TODO: Update paths based on deployment environment
-    
     logger.info("Environment configured")
     
     # =========================================================================
     # 2. Kafka Configuration
     # =========================================================================
-    # TODO: Move to configuration file or environment variables
-    KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
+    KAFKA_BOOTSTRAP_SERVERS = "kafka:29092"
     INSTRUCTION_TOPIC = "instructions"
-    DATASET_TOPIC = "datasets"
-    MODEL_OUTPUT_TOPIC = "model-updates"
+    COMMAND_OUTPUT_TOPIC = "factory_commands"
     
     # =========================================================================
-    # 3. Create Kafka Sources
+    # 3. Create Kafka Source for Instructions
     # =========================================================================
-    logger.info("Setting up Kafka sources...")
+    logger.info("Setting up Kafka source for instructions...")
     
-    # Source 1: Instructions from Observer
     instruction_source = create_kafka_source(
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         topic=INSTRUCTION_TOPIC,
         group_id="controller-instruction-consumer"
     )
     
-    # Source 2: Datasets from Collector
-    dataset_source = create_kafka_source(
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        topic=DATASET_TOPIC,
-        group_id="controller-dataset-consumer"
-    )
-    
     # =========================================================================
-    # 4. Create Data Streams
+    # 4. Create Data Stream
     # =========================================================================
-    logger.info("Creating data streams...")
+    logger.info("Creating instruction stream...")
     
-    # Stream 1: Read instructions and deserialize
+    # Read instructions and deserialize
     instruction_stream = env.from_source(
         instruction_source,
-        watermark_strategy=None,  # No watermarks needed for now
+        watermark_strategy=WatermarkStrategy.no_watermarks(),
         source_name="Instruction Source"
     ).map(
         lambda json_str: Instruction.from_json(json_str),
-        output_type=Types.PICKLED_BYTE_ARRAY()  # PyFlink will use pickle for complex objects
-    )
-    
-    # Stream 2: Read datasets and deserialize
-    dataset_stream = env.from_source(
-        dataset_source,
-        watermark_strategy=None,
-        source_name="Dataset Source"
-    ).map(
-        lambda json_str: TrainingDataset.from_json(json_str),
         output_type=Types.PICKLED_BYTE_ARRAY()
     )
     
     # =========================================================================
-    # 5. Connect Streams with CoProcessFunction
+    # 5. Apply ProcessFunction
     # =========================================================================
-    logger.info("Connecting streams with CoProcessFunction...")
+    logger.info("Applying ControllerProcessFunction...")
     
-    # Key both streams by model_id to ensure related data goes to the same parallel instance
-    keyed_dataset_stream = dataset_stream.key_by(lambda ds: ds.metadata.get('model_id', 'default'))
-    keyed_instruction_stream = instruction_stream.key_by(lambda inst: inst.model_id)
-    
-    # Connect the two streams
-    connected_stream = keyed_dataset_stream.connect(keyed_instruction_stream)
-    
-    # Apply the CoProcessFunction
-    model_output_stream = connected_stream.process(
-        ControllerCoProcessFunction(),
-        output_type=Types.STRING()  # Models will be serialized as strings
-    )
+    # Key by model_id and apply processing
+    command_stream = instruction_stream \
+        .key_by(lambda inst: inst.model_id) \
+        .process(
+            ControllerProcessFunction(),
+            output_type=Types.STRING()
+        )
     
     # =========================================================================
     # 6. Create Kafka Sink and Write Output
     # =========================================================================
-    logger.info("Setting up Kafka sink...")
+    logger.info("Setting up Kafka sink for commands...")
     
-    model_sink = create_kafka_sink(
+    command_sink = create_kafka_sink(
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        topic=MODEL_OUTPUT_TOPIC
+        topic=COMMAND_OUTPUT_TOPIC
     )
     
-    model_output_stream.sink_to(model_sink)
+    command_stream.sink_to(command_sink)
     
     # =========================================================================
     # 7. Execute the Job
@@ -202,3 +173,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
