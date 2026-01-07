@@ -1,6 +1,10 @@
 services:
   jobmanager:
-    image: apache/flink:1.17-java11
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    image: flink-rtcef:python-env
+    platform: linux/amd64
     ports:
       - "8081:8081"
     command: jobmanager
@@ -12,9 +16,14 @@ services:
     volumes:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
       - ./data:/opt/flink/data  # Mounting data folder to /opt/flink/data container-side
+      - ./python:/opt/flink/python_code # Mount python code
 
   taskmanager:
-    image: apache/flink:1.17-java11
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    image: flink-rtcef:python-env
+    platform: linux/amd64
     depends_on:
       - jobmanager
     command: taskmanager
@@ -28,3 +37,4 @@ services:
     volumes:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
       - ./data:/opt/flink/data  # Mounting data folder here is critical
+      - ./python:/opt/flink/python_code

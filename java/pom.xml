@@ -61,6 +61,12 @@
     </dependency>
 
     <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-connector-kafka</artifactId>
+        <version>${flink.version}</version>
+    </dependency>
+
+    <dependency>
         <groupId>org.scala-lang</groupId>
         <artifactId>scala-library</artifactId>
         <version>2.12.15</version>
@@ -69,6 +75,25 @@
   </dependencies>
   <build>
       <plugins>
+          <!-- Scala Compiler (Must run before Java Compiler for Mixed Mode) -->
+          <plugin>
+              <groupId>net.alchim31.maven</groupId>
+              <artifactId>scala-maven-plugin</artifactId>
+              <version>4.5.6</version>
+              <executions>
+                  <execution>
+                      <phase>process-resources</phase>
+                      <goals>
+                          <goal>compile</goal>
+                          <goal>testCompile</goal>
+                      </goals>
+                  </execution>
+              </executions>
+              <configuration>
+                  <scalaVersion>2.12.15</scalaVersion>
+              </configuration>
+          </plugin>
+
           <plugin>
               <groupId>org.apache.maven.plugins</groupId>
               <artifactId>maven-compiler-plugin</artifactId>
@@ -80,7 +105,7 @@
           </plugin>
 
           <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
+              <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-shade-plugin</artifactId>
             <version>3.4.1</version>
             <executions>
@@ -96,8 +121,17 @@
                                 <include>*:*</include>
                             </includes>
                             <excludes>
-                                <exclude>org.apache.flink:*</exclude>
+                                <!-- Exclude Flink Core/Streaming/Clients (provided by cluster) -->
+                                <exclude>org.apache.flink:flink-streaming-java</exclude>
+                                <exclude>org.apache.flink:flink-clients</exclude>
+                                <exclude>org.apache.flink:flink-core</exclude>
+                                <exclude>org.apache.flink:flink-java</exclude>
+                                <exclude>org.apache.flink:flink-runtime</exclude>
+                                <exclude>org.apache.flink:flink-optimizer</exclude>
+                                <exclude>org.apache.flink:flink-annotations</exclude>
+                                <exclude>org.apache.flink:flink-metrics-core</exclude>
                                 <exclude>com.google.code.findbugs:jsr305</exclude>
+                                <!-- Do NOT exclude flink-connector-kafka -->
                             </excludes>
                         </artifactSet>
                         <filters>
