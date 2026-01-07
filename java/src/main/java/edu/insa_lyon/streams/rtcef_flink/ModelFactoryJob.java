@@ -20,32 +20,62 @@ public class ModelFactoryJob {
 
         // Check required parameters
         if (!params.has("kafka-servers")) {
-            System.err.println("Usage: ModelFactoryJob --kafka-servers <servers> --input-topic <topic> --output-topic <topic>");
+            System.err.println("Usage: ModelFactoryJob --kafka-servers <servers> [--commands-topic <topic>] [--datasets-topic <topic>] [--output-topic <topic>]");
             return;
         }
 
         String kafkaServers = params.get("kafka-servers");
-        String inputTopic = params.get("input-topic", "factory_commands");
+        String commandsTopic = params.get("commands-topic", "factory_commands");
+        String datasetsTopic = params.get("datasets-topic", "datasets");
         String outputTopic = params.get("output-topic", "factory_reports");
-        String outputModelsTopic = params.get("output-models-topic", "model_versions");
         String groupId = params.get("group-id", "flink-factory-group");
 
-        // Kafka Source for Commands
-        KafkaSource<String> source = KafkaSource.<String>builder()
+        // =========================================================================
+        // Kafka Source 1: Commands from Controller
+        // =========================================================================
+        KafkaSource<String> commandsSource = KafkaSource.<String>builder()
                 .setBootstrapServers(kafkaServers)
-                .setTopics(inputTopic)
-                .setGroupId(groupId)
+                .setTopics(commandsTopic)
+                .setGroupId(groupId + "-commands")
                 .setStartingOffsets(OffsetsInitializer.latest())
                 .setValueOnlyDeserializer(new SimpleStringSchema())
                 .build();
 
-        DataStream<String> commandStream = env.fromSource(source, WatermarkStrategy.noWatermarks(), "Factory Commands Source");
+        DataStream<String> commandStream = env.fromSource(
+                commandsSource, 
+                WatermarkStrategy.noWatermarks(), 
+                "Factory Commands Source"
+        );
 
+        // =========================================================================
+        // Kafka Source 2: Datasets from Collector
+        // =========================================================================
+        KafkaSource<String> datasetsSource = KafkaSource.<String>builder()
+                .setBootstrapServers(kafkaServers)
+                .setTopics(datasetsTopic)
+                .setGroupId(groupId + "-datasets")
+                .setStartingOffsets(OffsetsInitializer.latest())
+                .setValueOnlyDeserializer(new SimpleStringSchema())
+                .build();
+
+        DataStream<String> datasetStream = env.fromSource(
+                datasetsSource, 
+                WatermarkStrategy.noWatermarks(), 
+                "Factory Datasets Source"
+        );
+
+        // =========================================================================
+        // Connect Streams and Apply CoProcessFunction
+        // =========================================================================
+        // Key by constant to ensure all commands/datasets go to same operator instance
         DataStream<String> reportStream = commandStream
-                .keyBy(value -> "factory-worker") // Keying by constant for simple parallelism control (1 worker)
-                .process(new WayebTrainingEngine());
+                .keyBy(value -> "factory-worker")
+                .connect(datasetStream.keyBy(value -> "factory-worker"))
+                .process(new ModelFactoryEngine());
 
+        // =========================================================================
         // Kafka Sink for Reports
+        // =========================================================================
         KafkaSink<String> sink = KafkaSink.<String>builder()
                 .setBootstrapServers(kafkaServers)
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
@@ -60,3 +90,4 @@ public class ModelFactoryJob {
         env.execute("Model Factory Job");
     }
 }
+

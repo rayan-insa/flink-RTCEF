@@ -23,7 +23,7 @@ class MockInstructionProducer:
     Mock producer that simulates Observer sending instructions
     """
     
-    def __init__(self, bootstrap_servers: str = 'localhost:9092', topic: str = 'instructions'):
+    def __init__(self, bootstrap_servers: str = 'kafka:29092', topic: str = 'instructions'):
         """
         Initialize the mock producer
         
@@ -68,7 +68,13 @@ class MockInstructionProducer:
             'timestamp': instruction.timestamp,
             'model_id': instruction.model_id,
             'parameters': instruction.parameters,
-            'metrics': instruction.metrics
+            'metrics': instruction.metrics,
+            "hyperparameters": {
+                "pMin": 0.001,
+                "gamma": 0.001,
+                "alpha": 0.001,
+                "r": 1.05
+            }
         }
         
         # Send to Kafka

@@ -23,6 +23,7 @@ class TrainingDataset:
     timestamp: int
     events: List[Dict[str, Any]]
     metadata: Dict[str, Any]
+    uri: str = None
     
     @classmethod
     def from_json(cls, json_str: str) -> 'TrainingDataset':
@@ -33,7 +34,8 @@ class TrainingDataset:
             dataset_id=data['dataset_id'],
             timestamp=data['timestamp'],
             events=data['events'],
-            metadata=data.get('metadata', {})
+            metadata=data.get('metadata', {}),
+            uri=data.get('uri', None)
         )
     
     def to_json(self) -> str:
@@ -43,7 +45,8 @@ class TrainingDataset:
             'dataset_id': self.dataset_id,
             'timestamp': self.timestamp,
             'events': self.events,
-            'metadata': self.metadata
+            'metadata': self.metadata,
+            'uri': self.uri
         })
     
     def size(self) -> int:
