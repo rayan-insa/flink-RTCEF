@@ -1,1 +1,11 @@
-apache-flink==2.1.1
+# Apache Flink Python API
+apache-flink==1.17.2
+
+# Kafka Integration
+kafka-python==2.0.2
+
+# Serialization
+python-avro==1.10.2
+
+# Utilities
+pydantic==2.5.0
