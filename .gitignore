@@ -263,4 +263,7 @@ log/.work/
 
 # Data
 data/saved_models/
+
+# External repositories
+external/
 data/saved_datasets/
