@@ -33,7 +33,7 @@ MODEL_OUTPUT   := $(DATA_DIR)/saved_models/tmp.spst
 # Default parameters (can be overridden from command line like: make submit THRESHOLD=0.5)
 MODEL_PATH ?= /opt/flink/data/saved_models/tmp.spst
 INPUT_PATH ?= /opt/flink/data/maritime.csv
-HORIZON ?= 30
+HORIZON ?= 600
 THRESHOLD ?= 0.3
 MAX_SPREAD ?= 5
 

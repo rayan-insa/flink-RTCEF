@@ -23,7 +23,7 @@ public class FlinkWayebJob {
         // Extract values with Defaults (fallback if not provided)
         String loadPath = params.get("modelPath", "/opt/flink/data/saved_models/tmp.spst");
         String inputPath = params.get("inputPath", "/opt/flink/data/maritime.csv");
-        int horizon = params.getInt("horizon", 30);
+        int horizon = params.getInt("horizon", 600);
         double runConfidenceThreshold = params.getDouble("threshold", 0.3);
         int maxSpread = params.getInt("maxSpread", 5);
 

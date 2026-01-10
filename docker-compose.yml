@@ -8,6 +8,7 @@ services:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
+        env.log.dir: /opt/flink/log
     volumes:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
       - ./data:/opt/flink/data  # Mounting data folder to /opt/flink/data container-side
@@ -23,6 +24,7 @@ services:
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 2
+        env.log.dir: /opt/flink/log
     volumes:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
       - ./data:/opt/flink/data  # Mounting data folder here is critical
