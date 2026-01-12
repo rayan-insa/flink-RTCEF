@@ -10,8 +10,17 @@ import scala.Tuple2;
 import scala.collection.immutable.Map$; // Factory for immutable maps
 import scala.collection.mutable.Builder;
 
+/**
+ * Parser for maritime CSV data.
+ * 
+ * Provides two modes:
+ * 1. flatMap() - Returns GenericEvent for Wayeb pattern matching
+ * (FlinkWayebJob)
+ * 2. parseLine() - Static method returning MaritimeEvent POJO for windowing
+ * (CollectorJob)
+ */
 public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
-    
+
     private int counter;
 
     @Override
@@ -20,15 +29,18 @@ public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
         counter = 1;
     }
 
+    /**
+     * FlatMap function that outputs GenericEvent for Wayeb pattern matching.
+     */
     @Override
     public void flatMap(String line, Collector<GenericEvent> out) {
         try {
             String[] cols = line.split(","); // Simple CSV split
-            
+
             // Parse fields based on the data structure
             long timestamp = Long.parseLong(cols[0].trim());
             String mmsi = cols[1].trim();
-            
+
             // Create the attribute map required by Wayeb
             Map<String, Object> args = new HashMap<>();
             args.put("mmsi", mmsi);
@@ -39,7 +51,9 @@ public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
             args.put("cog", Double.parseDouble(cols[6].trim()));
             args.put("annotation", cols[7].trim());
 
-            Builder<scala.Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>> builder = Map$.MODULE$.newBuilder();
+            @SuppressWarnings("unchecked")
+            Builder<scala.Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>> builder = (Builder<scala.Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>>) (Builder<?, ?>) Map$.MODULE$
+                    .newBuilder();
             for (java.util.Map.Entry<String, Object> entry : args.entrySet()) {
                 builder.$plus$eq(new Tuple2<>(entry.getKey(), entry.getValue()));
             }
@@ -52,6 +66,42 @@ public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
         } catch (Exception e) {
             // Skip bad lines without crashing
             // TODO: Add logging if needed
+        }
+    }
+
+    /**
+     * Static converter method that parses a CSV line into a MaritimeEvent POJO.
+     * Used by CollectorJob for windowing operations.
+     * 
+     * @param line CSV line in format:
+     *             timestamp,mmsi,lon,lat,speed,heading,cog,annotation
+     * @return MaritimeEvent or null if parsing fails
+     */
+    public static MaritimeEvent parseLine(String line) {
+        try {
+            // Skip header lines or empty lines
+            if (line == null || line.trim().isEmpty() || line.startsWith("timestamp")) {
+                return null;
+            }
+
+            String[] cols = line.split(",");
+            if (cols.length < 8) {
+                return null; // Skip malformed lines
+            }
+
+            long timestamp = Long.parseLong(cols[0].trim());
+            String mmsi = cols[1].trim();
+            double lon = Double.parseDouble(cols[2].trim());
+            double lat = Double.parseDouble(cols[3].trim());
+            double speed = Double.parseDouble(cols[4].trim());
+            double heading = Double.parseDouble(cols[5].trim());
+            double cog = Double.parseDouble(cols[6].trim());
+            String annotation = cols[7].trim();
+
+            return new MaritimeEvent(timestamp, mmsi, lon, lat, speed, heading, cog, annotation);
+
+        } catch (Exception e) {
+            return null; // Skip bad lines
         }
     }
 }
