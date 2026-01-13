@@ -7,6 +7,10 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
+
+import edu.insa_lyon.streams.rtcef_flink.utils.StatOutput;
+import edu.insa_lyon.streams.rtcef_flink.utils.PredictionOutput;
 import edu.insa_lyon.streams.rtcef_flink.utils.Scores;
 
 // Flink JSON (Shaded Jackson) for clean output
@@ -35,6 +39,7 @@ import fsm.runtime.Match;
 import model.vmm.pst.CyclicBuffer;
 import model.forecaster.runtime.ForecasterRun;
 import model.forecaster.runtime.ForecasterRunFactory;
+import model.forecaster.runtime.RelativeForecast;
 import model.waitingTime.ForecastMethod;
 import profiler.WtProfiler;
 import profiler.ForecastCollector;
@@ -63,7 +68,7 @@ import workflow.provider.MarkovChainProvider;
  * * This class runs on the Worker Nodes (TaskManagers).
  * 
  */
-public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, String> {
+public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, StatOutput> {
         // =========================================================================
         // 1. Configuration (The Blueprint)
         // =========================================================================
@@ -75,6 +80,8 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Stri
         private final int maxSpread; // Allowed variance in prediction
         private final boolean finalsEnabled = false;
         private final long statsReportingDistance = 600000;
+        public static final OutputTag<String> MATCH_TAG = new OutputTag<String>("detections"){};
+        public static final OutputTag<PredictionOutput> PRED_TAG = new OutputTag<PredictionOutput>("predictions"){};
 
         // =========================================================================
         // 2. Flink Persistent State (The Memory)
@@ -87,6 +94,7 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Stri
         private ValueState<CyclicBuffer> bufferState; // Internal event buffer
         private ValueState<Match> matchState; // Partial matches found so far
         private ValueState<Long> counterState; // Event counter (logic clock)
+        private ValueState<long[]> statsOffsetState;
         private ValueState<long[]> statsHistoryState; // Previous cumulative metrics (TP, TN, FP, FN)
         private ValueState<Long> nextReportTimeState; // When to report stats
 
@@ -161,6 +169,10 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Stri
 
                 // --- B. Initialize State Handles ---
                 // We tell Flink: "I need you to manage these specific variables for me."
+                statsHistoryState = getRuntimeContext().getState(
+                        new ValueStateDescriptor<>("statsHistory", long[].class));
+                statsOffsetState = getRuntimeContext().getState(
+                        new ValueStateDescriptor<>("statsOffset", long[].class));
                 confState = getRuntimeContext().getState(
                                 new ValueStateDescriptor<>("conf", fsm.symbolic.sra.Configuration.class));
                 startedState = getRuntimeContext().getState(
@@ -185,11 +197,22 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Stri
          * 
          */
         @Override
-        public void processElement(GenericEvent event, Context ctx, Collector<String> out) throws Exception {
+        public void processElement(GenericEvent event, Context ctx, Collector<StatOutput> out) throws Exception {
                 // 1. Engine Check: If the engines (Detector/Forecaster) don't exist yet, create
                 // them.
                 if (runEngine == null) {
-                        initializeEngine(out);
+                        initializeEngine(ctx);
+                }
+
+                if (statsOffsetState.value() == null) {
+                        long[] history = statsHistoryState.value();
+                        if (history != null) {
+                                // recovering from crash: set offset to the saved history
+                                statsOffsetState.update(history);
+                        } else {
+                                // fresh start for this key: set offset to 0
+                                statsOffsetState.update(new long[]{0L, 0L, 0L, 0L});
+                        }
                 }
 
                 // 2. Run Detection Logic
@@ -274,52 +297,28 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Stri
                         Map<String, Double> runtimeScores = Scores.getMetrics(tp, tn, fp, fn);
                         Map<String, Double> batchScores = Scores.getMetrics(batchTP, batchTN, batchFP, batchFN);
 
-                        // F. Construct JSON Report
-                        ObjectNode root = jsonMapper.createObjectNode();
-                        root.put("type", "STAT_REPORT");
-                        root.put("timestamp", currentTime);
-                        root.put("key", ctx.getCurrentKey());
-
-                        ObjectNode runtimeNode = root.putObject("runtime_metrics");
-                        runtimeNode.put("tp", tp);
-                        runtimeNode.put("fp", fp);
-                        runtimeNode.put("fn", fn);
-                        runtimeNode.put("precision", getScoreValue(runtimeScores, "precision"));
-                        runtimeNode.put("recall", getScoreValue(runtimeScores, "recall"));
-                        runtimeNode.put("f1", getScoreValue(runtimeScores, "f1"));
-
-                        ObjectNode batchNode = root.putObject("batch_metrics");
-                        batchNode.put("tp", batchTP);
-                        batchNode.put("fp", batchFP);
-                        batchNode.put("fn", batchFN);
-                        batchNode.put("precision", getScoreValue(batchScores, "precision"));
-                        batchNode.put("recall", getScoreValue(batchScores, "recall"));
+                        // F. Construct Reports
+                        StatOutput.MetricGroup runtimeGroup = new StatOutput.MetricGroup(
+                                tp, tn, fp, fn, runtimeScores.get("precision"), runtimeScores.get("recall"), runtimeScores.get("f1")
+                        );
+                        StatOutput.MetricGroup batchGroup = new StatOutput.MetricGroup(
+                                batchTP, batchTN, batchFP, batchFN, batchScores.get("precision"), batchScores.get("recall"), batchScores.get("f1") // Use defaults if null
+                        );
 
                         // G. Emit to Output Stream
                         // The Observer will look for lines starting with "STATS:" or parse the JSON
-                        out.collect("STATS:" + root.toString());
+                        out.collect(new StatOutput(currentTime, ctx.getCurrentKey(), runtimeGroup, batchGroup));
 
                         currentNextReportTime = currentTime + statsReportingDistance;
                         nextReportTimeState.update(currentNextReportTime);
                 }
         }
-
-        // Helper to safely extract scores from Scala Map -> Java Double
-        private double getScoreValue(Map<String, Double> scores, String key) {
-                Double value = scores.get(key);
-                if (value != null) {
-                        return value.doubleValue();
-                }
-
-                return 0.0;
-        }
-
         /**
          * 
          * Wiring the components together.
          * 
          */
-        private void initializeEngine(Collector<String> out) throws Exception {
+        private void initializeEngine(Context ctx) throws Exception {
                 // 1. Create the Detector (Run)
                 // This tracks where we are in the pattern.
                 runEngine = Run$.MODULE$.apply(1, this.fsm);
@@ -340,9 +339,26 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Stri
                                 // A. Pass the update to the Forecaster
                                 forecasterEngine.newEventProcessed(rm);
 
+                                RelativeForecast pred = forecasterEngine.getCurrentPrediction();
+
+                                if (pred.isValid()) {
+                                        PredictionOutput output = new PredictionOutput(
+                                                rm.timestamp(),
+                                                ctx.getCurrentKey(),
+                                                pred.prob(),
+                                                pred.startRelativeToNow(), // How far in the future starts
+                                                pred.endRelativeToNow(),   // How far in the future ends
+                                                pred.isPositive()          // Classification result
+                                        );
+                                        
+                                        // Emit to Side Output
+                                        ctx.output(PRED_TAG, output);
+                                }
+
                                 // B. Check if the pattern is complete (Detection)
                                 if (rm.fmDetected()) {
-                                        out.collect("Detected Pattern at " + rm.timestamp());
+                                        String msg = "Detected Pattern at " + rm.timestamp();
+                                        ctx.output(MATCH_TAG, msg);
                                 }
                         }
 
