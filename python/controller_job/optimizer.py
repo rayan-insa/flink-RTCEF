@@ -61,7 +61,7 @@ class HyperparameterOptimizer:
             # Define search space
             space = [
                 Real(bounds.get('pMin_min', 0.001), bounds.get('pMin_max', 0.1), name='pMin'),
-                Real(bounds.get('gamma_min', 0.0), bounds.get('gamma_max', 1.0), name='gamma')
+                Real(bounds.get('gamma_min', 0.0), bounds.get('gamma_max', 0.005), name='gamma')
             ]
             
             try:
@@ -88,7 +88,7 @@ class HyperparameterOptimizer:
                 command = base_command.copy()
                 command["type"] = "TRAIN"
                 command["pMin"] = 0.05
-                command["gamma"] = 0.5
+                command["gamma"] = 0.001
                 command["error"] = str(e)
                 return command
         
@@ -104,4 +104,21 @@ class HyperparameterOptimizer:
         else:
             self.logger.warning(f"Unknown instruction type: {instruction.instruction_type}")
             return None
+
+    def update_model(self, report: dict):
+        """
+        Update the optimizer state based on a Factory report.
+        
+        Args:
+            report: The training report from Factory
+        """
+        model_id = report.get('model_id', 'unknown')
+        status = report.get('status', 'unknown')
+        
+        if status == 'success':
+            self.logger.info(f"Optimizer received SUCCESS report for {model_id}. Params: pMin={report.get('pMin')}, gamma={report.get('gamma')}")
+            # In a real implementation, we would update the skopt model here with (params, metric)
+            # self.optimizer.tell([pMin, gamma], loss)
+        else:
+            self.logger.warning(f"Optimizer received FAILED report for {model_id}: {report.get('error')}")
 

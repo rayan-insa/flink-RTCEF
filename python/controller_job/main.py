@@ -24,7 +24,7 @@ from pyflink.common.watermark_strategy import WatermarkStrategy
 import logging
 import sys
 
-from controller_job.functions.controller_process import ControllerProcessFunction
+from controller_job.functions.controller_coprocess import ControllerCoProcessFunction
 from controller_job.models.instruction import Instruction
 
 
@@ -135,15 +135,46 @@ def main():
     )
     
     # =========================================================================
-    # 5. Apply ProcessFunction
+    # 5. Connect Streams and Apply CoProcessFunction
     # =========================================================================
-    logger.info("Applying ControllerProcessFunction...")
+    logger.info("Setting up Kafka source for Factory Reports...")
     
-    # Key by model_id and apply processing
+    REPORT_TOPIC = "factory_reports"
+    
+    report_source = create_kafka_source(
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        topic=REPORT_TOPIC,
+        group_id="controller-report-consumer"
+    )
+    
+    report_stream = env.from_source(
+        report_source,
+        watermark_strategy=WatermarkStrategy.no_watermarks(),
+        source_name="Report Source"
+    )
+    
+    logger.info("Connecting Instructions and Reports...")
+    
+    # Key both streams by model_id (assuming report contains model_id in JSON body)
+    # Note: For simplicity, we key instructions by object attr and reports by a lambda parsing JSON
+    # A more robust approach would be to map reports to a strongly typed object first.
+    
+    def parse_model_id_from_report(json_str: str) -> str:
+        try:
+            import json
+            data = json.loads(json_str)
+            return data.get("model_id", "unknown")
+        except:
+            return "unknown"
+
     command_stream = instruction_stream \
-        .key_by(lambda inst: inst.model_id) \
+        .connect(report_stream) \
+        .key_by(
+            lambda inst: inst.model_id,               # Key selector for Stream 1 (Instruction)
+            parse_model_id_from_report                # Key selector for Stream 2 (String/JSON Report)
+        ) \
         .process(
-            ControllerProcessFunction(),
+            ControllerCoProcessFunction(),            # The logic that merges both
             output_type=Types.STRING()
         )
     
