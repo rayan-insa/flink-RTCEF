@@ -3,7 +3,7 @@ package edu.insa_lyon.streams.rtcef_flink;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 
 import edu.insa_lyon.streams.rtcef_flink.utils.PredictionOutput;
-import edu.insa_lyon.streams.rtcef_flink.utils.StatOutput;
+import edu.insa_lyon.streams.rtcef_flink.utils.ReportOutput;
 
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -50,7 +50,7 @@ public class FlinkWayebJob {
             .flatMap(new MaritimeParser());
 
         // --- 3. Process each event ---
-        SingleOutputStreamOperator<StatOutput> statsStream = stream
+        SingleOutputStreamOperator<ReportOutput> reportStream = stream
             .keyBy(e -> e.getValueOf("mmsi").toString())
             .process(new FlinkEngine(
                 loadPath,
@@ -59,13 +59,13 @@ public class FlinkWayebJob {
                 maxSpread
             ));
 
-        DataStream<String> detectionStream = statsStream
+        DataStream<String> detectionStream = reportStream
             .getSideOutput(FlinkEngine.MATCH_TAG);
 
-        DataStream<PredictionOutput> predictionStream = statsStream
+        DataStream<PredictionOutput> predictionStream = reportStream
             .getSideOutput(FlinkEngine.PRED_TAG);
 
-        statsStream.print("STATS");         // Prints the structured POJO
+        reportStream.print("REPORT");         // Prints the structured POJO
         detectionStream.print("ALERT");     // Prints "Detected Pattern at..."
         predictionStream.print("FORECAST"); // Prints PRED{ts=..., prob=0.85, window=[+10, +15]}
 

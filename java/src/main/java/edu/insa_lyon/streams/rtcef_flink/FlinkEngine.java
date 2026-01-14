@@ -9,7 +9,7 @@ import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 
-import edu.insa_lyon.streams.rtcef_flink.utils.StatOutput;
+import edu.insa_lyon.streams.rtcef_flink.utils.ReportOutput;
 import edu.insa_lyon.streams.rtcef_flink.utils.PredictionOutput;
 import edu.insa_lyon.streams.rtcef_flink.utils.Scores;
 
@@ -68,7 +68,7 @@ import workflow.provider.MarkovChainProvider;
  * * This class runs on the Worker Nodes (TaskManagers).
  * 
  */
-public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, StatOutput> {
+public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, ReportOutput> {
         // =========================================================================
         // 1. Configuration (The Blueprint)
         // =========================================================================
@@ -197,7 +197,7 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Stat
          * 
          */
         @Override
-        public void processElement(GenericEvent event, Context ctx, Collector<StatOutput> out) throws Exception {
+        public void processElement(GenericEvent event, Context ctx, Collector<ReportOutput> out) throws Exception {
                 // 1. Engine Check: If the engines (Detector/Forecaster) don't exist yet, create
                 // them.
                 if (runEngine == null) {
@@ -298,16 +298,18 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Stat
                         Map<String, Double> batchScores = Scores.getMetrics(batchTP, batchTN, batchFP, batchFN);
 
                         // F. Construct Reports
-                        StatOutput.MetricGroup runtimeGroup = new StatOutput.MetricGroup(
-                                tp, tn, fp, fn, runtimeScores.get("precision"), runtimeScores.get("recall"), runtimeScores.get("f1")
+                        ReportOutput.MetricGroup runtimeGroup = new ReportOutput.MetricGroup(
+                                tp, tn, fp, fn, runtimeScores.get("precision"), runtimeScores.get("recall"), runtimeScores.get("f1"), 
+                                runtimeScores.get("mcc")
                         );
-                        StatOutput.MetricGroup batchGroup = new StatOutput.MetricGroup(
-                                batchTP, batchTN, batchFP, batchFN, batchScores.get("precision"), batchScores.get("recall"), batchScores.get("f1") // Use defaults if null
+                        ReportOutput.MetricGroup batchGroup = new ReportOutput.MetricGroup(
+                                batchTP, batchTN, batchFP, batchFN, batchScores.get("precision"), batchScores.get("recall"), batchScores.get("f1"),
+                                batchScores.get("mcc") // Use defaults if null
                         );
 
                         // G. Emit to Output Stream
                         // The Observer will look for lines starting with "STATS:" or parse the JSON
-                        out.collect(new StatOutput(currentTime, ctx.getCurrentKey(), runtimeGroup, batchGroup));
+                        out.collect(new ReportOutput(currentTime, ctx.getCurrentKey(), runtimeGroup, batchGroup));
 
                         currentNextReportTime = currentTime + statsReportingDistance;
                         nextReportTimeState.update(currentNextReportTime);

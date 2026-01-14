@@ -50,6 +50,9 @@ public class Scores {
             mcc = Math.sqrt(precision * recall * specificity * npv) - 
                   Math.sqrt(fdr * fnr * fpr * fomr);
         }
+        else {
+            mcc = 0.0;
+        }
 
         // --- 5. Construct Result Map ---
         Map<String, Double> metrics = new HashMap<>();
@@ -57,6 +60,7 @@ public class Scores {
         metrics.put("precision", precision);
         metrics.put("recall", recall);
         metrics.put("f1", f1);
+        metrics.put("mcc", mcc);
 
         return metrics;
     }
