@@ -153,6 +153,7 @@ public class FlinkEngine extends KeyedProcessFunction<String, GenericEvent, Repo
                 WtProvider wtp = WtProvider
                                 .apply(WtSourceMatrix.apply(fsmProvider, markovChainProvider, horizon, finalsEnabled));
 
+                                
                 // 3. Build the Forecaster Provider (Factory)
                 Enumeration.Value methodEnum = ForecastMethod.CLASSIFY_NEXTK();
                 this.predProvider = ForecasterProvider.apply(
