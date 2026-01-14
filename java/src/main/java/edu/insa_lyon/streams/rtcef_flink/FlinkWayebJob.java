@@ -1,11 +1,16 @@
 package edu.insa_lyon.streams.rtcef_flink;
 
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+import edu.insa_lyon.streams.rtcef_flink.utils.PredictionOutput;
+import edu.insa_lyon.streams.rtcef_flink.utils.ReportOutput;
+
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.connector.file.src.FileSource;
 import org.apache.flink.connector.file.src.reader.TextLineInputFormat;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.api.java.utils.ParameterTool;
 import stream.GenericEvent;
 
@@ -23,7 +28,7 @@ public class FlinkWayebJob {
         // Extract values with Defaults (fallback if not provided)
         String loadPath = params.get("modelPath", "/opt/flink/data/saved_models/tmp.spst");
         String inputPath = params.get("inputPath", "/opt/flink/data/maritime.csv");
-        int horizon = params.getInt("horizon", 30);
+        int horizon = params.getInt("horizon", 600);
         double runConfidenceThreshold = params.getDouble("threshold", 0.3);
         int maxSpread = params.getInt("maxSpread", 5);
 
@@ -45,15 +50,24 @@ public class FlinkWayebJob {
             .flatMap(new MaritimeParser());
 
         // --- 3. Process each event ---
-        stream
+        SingleOutputStreamOperator<ReportOutput> reportStream = stream
             .keyBy(e -> e.getValueOf("mmsi").toString())
             .process(new FlinkEngine(
                 loadPath,
                 horizon,
                 runConfidenceThreshold,
                 maxSpread
-            ))
-            .print();
+            ));
+
+        DataStream<String> detectionStream = reportStream
+            .getSideOutput(FlinkEngine.MATCH_TAG);
+
+        DataStream<PredictionOutput> predictionStream = reportStream
+            .getSideOutput(FlinkEngine.PRED_TAG);
+
+        reportStream.print("REPORT");         // Prints the structured POJO
+        detectionStream.print("ALERT");     // Prints "Detected Pattern at..."
+        predictionStream.print("FORECAST"); // Prints PRED{ts=..., prob=0.85, window=[+10, +15]}
 
         env.execute("Wayeb Flink Job");
     }
