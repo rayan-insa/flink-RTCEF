@@ -68,40 +68,4 @@ public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
             // TODO: Add logging if needed
         }
     }
-
-    /**
-     * Static converter method that parses a CSV line into a MaritimeEvent POJO.
-     * Used by CollectorJob for windowing operations.
-     * 
-     * @param line CSV line in format:
-     *             timestamp,mmsi,lon,lat,speed,heading,cog,annotation
-     * @return MaritimeEvent or null if parsing fails
-     */
-    public static MaritimeEvent parseLine(String line) {
-        try {
-            // Skip header lines or empty lines
-            if (line == null || line.trim().isEmpty() || line.startsWith("timestamp")) {
-                return null;
-            }
-
-            String[] cols = line.split(",");
-            if (cols.length < 8) {
-                return null; // Skip malformed lines
-            }
-
-            long timestamp = Long.parseLong(cols[0].trim());
-            String mmsi = cols[1].trim();
-            double lon = Double.parseDouble(cols[2].trim());
-            double lat = Double.parseDouble(cols[3].trim());
-            double speed = Double.parseDouble(cols[4].trim());
-            double heading = Double.parseDouble(cols[5].trim());
-            double cog = Double.parseDouble(cols[6].trim());
-            String annotation = cols[7].trim();
-
-            return new MaritimeEvent(timestamp, mmsi, lon, lat, speed, heading, cog, annotation);
-
-        } catch (Exception e) {
-            return null; // Skip bad lines
-        }
-    }
 }
