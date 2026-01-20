@@ -1,5 +1,6 @@
 import Build.simAssemblySettings
 import Build.cefAssemblySettings
+import Build.observerAssemblySettings
 
 addCommandAlias("build", ";compile;test;assembly")
 addCommandAlias("rebuild", ";clean;build")
@@ -9,7 +10,8 @@ lazy val global = project
   .disablePlugins(AssemblyPlugin)
   .aggregate(
     cef,
-    sim
+    sim,
+    observer
   )
 
 lazy val cef = project
@@ -30,3 +32,12 @@ lazy val sim = project
   .settings(libraryDependencies ++= Dependencies.Logging)
   .settings(libraryDependencies ++= Dependencies.Tools)
   .settings(simAssemblySettings)
+
+lazy val observer = project
+  .settings(name := "observer")
+  .settings(logLevel in Test := Level.Info)
+  .settings(logLevel in Compile := Level.Error)
+  .settings(libraryDependencies ++= Dependencies.Logging)
+  .settings(libraryDependencies ++= Dependencies.Testing)
+  .settings(libraryDependencies ++= Dependencies.Tools)
+  .settings(observerAssemblySettings)

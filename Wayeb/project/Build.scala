@@ -96,4 +96,18 @@ object Build extends AutoPlugin {
       case _ => MergeStrategy.first
     }
   )
+
+  lazy val observerAssemblySettings: Seq[Setting[_]] = Seq(
+
+    mainClass in assembly := Some("observer.Main"),
+
+    test in assembly := { },
+
+    assemblyJarName in assembly := s"${name.value.toLowerCase}-${version.value}.jar",
+
+    assemblyMergeStrategy in assembly := {
+      case PathList("META-INF", _ @ _*) => MergeStrategy.discard
+      case _ => MergeStrategy.first
+    }
+  )
 }
