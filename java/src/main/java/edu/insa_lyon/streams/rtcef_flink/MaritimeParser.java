@@ -10,8 +10,17 @@ import scala.Tuple2;
 import scala.collection.immutable.Map$; // Factory for immutable maps
 import scala.collection.mutable.Builder;
 
+/**
+ * Parser for maritime CSV data.
+ * 
+ * Provides two modes:
+ * 1. flatMap() - Returns GenericEvent for Wayeb pattern matching
+ * (FlinkWayebJob)
+ * 2. parseLine() - Static method returning MaritimeEvent POJO for windowing
+ * (CollectorJob)
+ */
 public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
-    
+
     private int counter;
 
     @Override
@@ -20,15 +29,18 @@ public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
         counter = 1;
     }
 
+    /**
+     * FlatMap function that outputs GenericEvent for Wayeb pattern matching.
+     */
     @Override
     public void flatMap(String line, Collector<GenericEvent> out) {
         try {
             String[] cols = line.split(","); // Simple CSV split
-            
+
             // Parse fields based on the data structure
             long timestamp = Long.parseLong(cols[0].trim());
             String mmsi = cols[1].trim();
-            
+
             // Create the attribute map required by Wayeb
             Map<String, Object> args = new HashMap<>();
             args.put("mmsi", mmsi);
@@ -39,7 +51,9 @@ public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
             args.put("cog", Double.parseDouble(cols[6].trim()));
             args.put("annotation", cols[7].trim());
 
-            Builder<scala.Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>> builder = Map$.MODULE$.newBuilder();
+            @SuppressWarnings("unchecked")
+            Builder<scala.Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>> builder = (Builder<scala.Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>>) (Builder<?, ?>) Map$.MODULE$
+                    .newBuilder();
             for (java.util.Map.Entry<String, Object> entry : args.entrySet()) {
                 builder.$plus$eq(new Tuple2<>(entry.getKey(), entry.getValue()));
             }
