@@ -118,13 +118,13 @@ The system follows a "Wrapper Pattern" where Flink handles the distributed strea
 |-------------| ------------- | -------------|
 |Stream Runner| Apache Flink (Java 11) | Reads CSV streams, partitions data by key (e.g., mmsi), and manages fault tolerance (State Backends). |
 | Core Engine | Wayeb (Scala 2.12) | Implements the Finite State Machine (FSM) and Probabilistic Suffix Trees (PST) for detection and forecasting. |
-| Bridge | FlinkEngine.java | A KeyedProcessFunction that initializes Wayeb lazily on workers and bridges Flink State to Wayeb's internal memory. |
+| Bridge | WayebEngine.java | A KeyedProcessFunction that initializes Wayeb lazily on workers and bridges Flink State to Wayeb's internal memory. |
 
 **How It Works**:
 
-> **_IMPORTANT:_** The ``Makefile`` allows to compile and train a sample model (**Training Phase**) to test the runtime phase but in practice, the initial training should be handled by the overall system.
+> ***IMPORTANT:*** The ``Makefile`` allows to compile and train a sample model (**Training Phase**) to test the runtime phase but in practice, the initial training should be handled by the overall system.
 
-1. **Training Phase (Offline)**: 
+1. **Training Phase (Offline)**:
    - **Compile**: Converts Symbolic Regular Expressions (``.sre``) into a Symbolic Finite Automaton (``.spst``).
 
    - **Learn (MLE)**: Replays historical streams to learn transition probabilities, generating a Markov Chain model (``.spst.mc``).
@@ -151,7 +151,7 @@ The system follows a "Wrapper Pattern" where Flink handles the distributed strea
 - **SBT**: For building Wayeb.
 - **Make**: To run the automated workflow.
 
-> **_NOTE:_**: On macOS/Linux, the `Makefile` attempts to auto-detect JDK paths. You can override them if detection fails or for custom setups:
+> ***NOTE:***: On macOS/Linux, the `Makefile` attempts to auto-detect JDK paths. You can override them if detection fails or for custom setups:
 >
 > ```bash
 > make build JAVA_HOME="/usr/lib/jvm/java-11"
@@ -172,7 +172,7 @@ cd flink-RTCEF
 make start
 ```
 
-The Flink Cluster UI should be available at http://localhost:8081. It is useful to check logs and graphs of each Flink jobs.
+The Flink Cluster UI should be available at <http://localhost:8081>. It is useful to check logs and graphs of each Flink jobs.
 
 **3. Run the project**
 
@@ -188,10 +188,9 @@ This command will:
 4. Compile an automaton from a given pattern and learn a predictive model from the given sample maritime dataset
 5. Upload the Flink Job to the Cluster and run the Job
 
-> **_IMPORTANT:_**: For now, this command is training a prediction model over sample maritime data and predicting over the SAME data. This is just for illustration purposes.
+> ***IMPORTANT:***: For now, this command is training a prediction model over sample maritime data and predicting over the SAME data. This is just for illustration purposes.
 
-> **_NOTE:_**: To bypass re-building and re-training Wayeb each time when testing Java code only, use **make build-flink** followed by **make submit** to build only Flin Java code and submit it to the Cluster.
-
+> ***NOTE:***: To bypass re-building and re-training Wayeb each time when testing Java code only, use **make build-flink** followed by **make submit** to build only Flin Java code and submit it to the Cluster.
 
 **4. Show forecast logs**
 
@@ -205,7 +204,7 @@ make logs
 make stop
 ```
 
-> **_NOTE:_**: You can always run ``make help`` to see available commands:
+> ***NOTE:***: You can always run ``make help`` to see available commands:
 >
 > ```bash
 > make help
@@ -245,7 +244,7 @@ $$MCC = \sqrt{Precision \times Recall \times Specificity \times NPV} - \sqrt{FDR
 │   ├── cef/                 # Main logic (Detection/Forecasting)
 │   └── patterns/            # Pattern definitions (.sre files)
 ├── java/                    # The Flink Application
-│   ├── src/main/java/       # Flink Jobs (FlinkWayebJob, FlinkEngine)
+│   ├── src/main/java/       # Flink Jobs (InferenceJob, WayebEngine)
 │   └── pom.xml              # Dependencies (Flink 1.17.2)
 ├── data/                    # Shared volume for Docker
 │   └── save_models/         # Model saved during the different phases
@@ -253,6 +252,7 @@ $$MCC = \sqrt{Precision \times Recall \times Specificity \times NPV} - \sqrt{FDR
 ├── Makefile                 # Orchestration scripts
 └── README.md
 ```
+
 ---
 
 ## 📖 References
@@ -268,11 +268,10 @@ $$MCC = \sqrt{Precision \times Recall \times Specificity \times NPV} - \sqrt{FDR
 
 This project is developed as part of the **Data System Research** module, a final year Computer Science course at **INSA Lyon**, supervised by **Riccardo Tommasini**.
 
-**Lizhi Zhang** - lizhi.zhang@insa-lyon.fr \
-**Rayan Hanader** - rayan.hanader@insa-lyon.fr \
-**Shuyan Dou** - shuyan.dou@insa-lyon.fr \
-**Remi Vialleton** - remi.vialleton@insa-lyon.fr
-
+**Lizhi Zhang** - <lizhi.zhang@insa-lyon.fr> \
+**Rayan Hanader** - <rayan.hanader@insa-lyon.fr> \
+**Shuyan Dou** - <shuyan.dou@insa-lyon.fr> \
+**Remi Vialleton** - <remi.vialleton@insa-lyon.fr>
 
 ---
 

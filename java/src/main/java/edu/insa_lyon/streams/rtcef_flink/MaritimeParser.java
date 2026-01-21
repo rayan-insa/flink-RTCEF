@@ -15,7 +15,7 @@ import scala.collection.mutable.Builder;
  * 
  * Provides two modes:
  * 1. flatMap() - Returns GenericEvent for Wayeb pattern matching
- * (FlinkWayebJob)
+ * (InferenceJob)
  * 2. parseLine() - Static method returning MaritimeEvent POJO for windowing
  * (CollectorJob)
  */

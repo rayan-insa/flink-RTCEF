@@ -18,7 +18,7 @@ WAYEB_JAR      := $(WAYEB_DIR)/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar
 # The Flink Job Jar (Maven Package)
 FLINK_JOB_JAR  := $(JAVA_DIR)/target/$(PROJECT_NAME)-$(VERSION).jar
 # Class to run in Flink
-JOB_CLASS      := edu.insa_lyon.streams.rtcef_flink.FlinkWayebJob
+JOB_CLASS      := edu.insa_lyon.streams.rtcef_flink.InferenceJob
 
 # --- Flink Configuration ---
 FLINK_JM_URL   := localhost:8081
