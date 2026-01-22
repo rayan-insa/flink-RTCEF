@@ -62,20 +62,25 @@ This document outlines the architectural and implementation differences between 
 **Flink**: Currently ignored (Voluntary simplification).
 
 * **Description**: The original system uses `ResetEvent` to clear partial matches when data streams are stitched together. This implementation currently treats all events as standard data points.
+* **Description**: The original system uses `ResetEvent` to clear partial matches when data streams are stitched together. This implementation currently treats all events as standard data points.
 * **Justification**: Focus is placed on steady-state performance. For the current maritime use case, state "pollution" from disconnected segments is considered a secondary concern compared to implementation complexity.
 * **Pros**: Leaner engine code.
 * **Cons**: Potential for incorrect predictions if a ship's context changes significantly after a long data gap without a state reset.
 
 ---
 
-## 7. Parallelism & Scalability
+## 7. Parallelism & Scalability (Major Architecture Divergence)
 
-**Original**: Service-based (Python), often single-threaded or manually sharded.
-**Flink**: Native Keyed-Parallelism.
+**Original**: Single Global Engine Instance (Sequential).
+**Flink**: Distributed Keyed-Parallelism (Sharded by MMSI).
 
-* **Description**: Flink automatically partitions the stream by `mmsi`. Each ship's state (engine, buffers, metrics) is isolated and can be processed on different cluster nodes.
-* **Pros**: Horizontal scalability is "free"; state is localized, reducing lock contention.
-* **Cons**: Requires careful management of the `BroadcastState` to ensure all parallel instances receive model updates simultaneously.
+* **Description**:
+  * *Original*: A single `OOFERFEngine` consumes the entire stream. It calculates global model metrics (TP/TN/FP/FN) by aggregating all events from all vessels sequentially.
+  * *Flink*: The stream is partitioned (`keyBy(mmsi)`). Multiple `WayebEngine` instances run in parallel on different cluster nodes, each handling a subset of vessels. Each engine calculates metrics *only* for its assigned vessels.
+* **Justification**: The original sequential approach is a scalability bottleneck. Flink's keyed approach allows the system to scale horizontally to millions of vessels by simply adding more worker nodes.
+* **Implication**: The "Score" emitted by `WayebEngine` in Flink is local to a ship. To match the original Observer's logic (which decides based on global health), an explicit aggregation step (Map-Reduce) is required before the Observer.
+* **Pros**: Infinite horizontal scalability; robust fault isolation (one ship crashing doesn't kill the pipeline).
+* **Cons**: Requires an extra aggregation window to reconstruct the global view.
 
 ## 8. Out-of-Order Handling (Watermarks)
 

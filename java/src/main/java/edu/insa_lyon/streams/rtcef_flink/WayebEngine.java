@@ -78,10 +78,13 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     private final double runConfidenceThreshold;
     private final int maxSpread;
     private final boolean finalsEnabled = false;
-    private final long statsReportingDistance = 600000;
+    private final long statsReportingDistance;
     public static final OutputTag<String> MATCH_TAG = new OutputTag<String>("detections"){};
     public static final OutputTag<PredictionOutput> PRED_TAG = new OutputTag<PredictionOutput>("predictions"){};
 
+    // =========================================================================
+    // 2. Flink Persistent State (The Memory)
+    // =========================================================================
     // =========================================================================
     // 2. Flink Persistent State (The Memory)
     // =========================================================================
@@ -98,7 +101,10 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     private ValueState<String> currentModelPathState; 
     private ValueState<String> scheduledModelPathState; // Track which update was already scheduled per key
     private ValueState<String> pendingModelPathState; 
-    private ValueState<Long> syncTimestampState;     
+    private ValueState<Long> syncTimestampState;
+    
+    // Engine Sync State (pause during optimization)
+    private ValueState<Boolean> pausedState;     
 
     // =========================================================================
     // 3. Transient Objects (The Engines)
@@ -118,11 +124,13 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
             String initialModelPath,
             int horizon,
             double runConfidenceThreshold,
-            int maxSpread) {
+            int maxSpread,
+            long statsReportingDistance) {
         this.initialModelPath = initialModelPath;
         this.horizon = horizon;
         this.runConfidenceThreshold = runConfidenceThreshold;
         this.maxSpread = maxSpread;
+        this.statsReportingDistance = statsReportingDistance;
     }
 
     private void loadWayebModels(String path) throws Exception {
@@ -180,6 +188,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
         scheduledModelPathState = getRuntimeContext().getState(new ValueStateDescriptor<>("scheduledModelPath", String.class));
         pendingModelPathState = getRuntimeContext().getState(new ValueStateDescriptor<>("pendingModelPath", String.class));
         syncTimestampState = getRuntimeContext().getState(new ValueStateDescriptor<>("syncTimestamp", Long.class));
+        pausedState = getRuntimeContext().getState(new ValueStateDescriptor<>("paused", Boolean.class));
     }
 
     /**
@@ -189,8 +198,38 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     public void processElement(GenericEvent event, ReadOnlyContext ctx, Collector<ReportOutput> out) throws Exception {
         this.lastEventTime = event.timestamp();
         
-        // 1. Check for NEW BROADCAST MODELS that haven't been scheduled for this key yet
+        // 0. Check if engine is PAUSED (during optimization)
+        Boolean paused = pausedState.value();
+        if (paused != null && paused) {
+            // Engine is paused - skip processing (events are dropped during optimization)
+            // A more sophisticated impl could buffer events
+            return;
+        }
+        
+        // 0.5. Check for SYNC commands (pause/play) in broadcast state
         ReadOnlyBroadcastState<String, String> bState = ctx.getBroadcastState(InferenceJob.MODEL_UPDATE_DESCRIPTOR);
+        String syncJson = bState.get("SYNC");
+        if (syncJson != null) {
+            ObjectMapper m = getMapper();
+            JsonNode syncRoot = m.readTree(syncJson);
+            String syncType = syncRoot.path("type").asText();
+            
+            if ("pause".equalsIgnoreCase(syncType)) {
+                if (paused == null || !paused) {
+                    System.out.println("[WayebEngine] Key=" + ctx.getCurrentKey() + " PAUSING due to optimization");
+                    pausedState.update(true);
+                    return; // Skip processing
+                }
+            } else if ("play".equalsIgnoreCase(syncType)) {
+                if (paused != null && paused) {
+                    System.out.println("[WayebEngine] Key=" + ctx.getCurrentKey() + " RESUMING after optimization");
+                    pausedState.update(false);
+                    // Continue processing - don't return
+                }
+            }
+        }
+        
+        // 1. Check for NEW BROADCAST MODELS that haven't been scheduled for this key yet
         String latestUpdateJson = bState.get("LATEST");
         
         if (latestUpdateJson != null) {
@@ -264,6 +303,28 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
             ObjectMapper m = getMapper();
             JsonNode root = m.readTree(jsonReport);
             
+            // Handle SYNC commands (pause/play) from Controller
+            String syncType = root.path("type").asText();
+            if ("pause".equalsIgnoreCase(syncType)) {
+                System.out.println("[WayebEngine] Broadcast: PAUSE received - pausing inference");
+                // Store in broadcast state for all keyed instances to see
+                BroadcastState<String, String> bState = ctx.getBroadcastState(InferenceJob.MODEL_UPDATE_DESCRIPTOR);
+                bState.put("SYNC", jsonReport);
+                return;
+            } else if ("play".equalsIgnoreCase(syncType)) {
+                String modelPath = root.path("model_path").asText();
+                int modelId = root.path("model_id").asInt(-1);
+                System.out.println("[WayebEngine] Broadcast: PLAY received - resuming with model_id=" + modelId);
+                BroadcastState<String, String> bState = ctx.getBroadcastState(InferenceJob.MODEL_UPDATE_DESCRIPTOR);
+                bState.put("SYNC", jsonReport);
+                // If a new model path is provided, also store it as LATEST for loading
+                if (modelPath != null && !modelPath.isEmpty()) {
+                    bState.put("LATEST", jsonReport);
+                }
+                return;
+            }
+            
+            // Handle Model Update notifications (existing logic)
             if ("success".equalsIgnoreCase(root.path("status").asText())) {
                 String newPath = root.path("model_path").asText();
                 System.out.println("[WayebEngine] Broadcast: New model available at " + newPath);

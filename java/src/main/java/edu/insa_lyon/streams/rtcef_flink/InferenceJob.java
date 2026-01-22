@@ -23,6 +23,7 @@ import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 
 import stream.GenericEvent;
 
@@ -74,27 +75,23 @@ public class InferenceJob {
         final int lastK = params.getInt("lastK", 3);
         final String kafkaServers = params.get("kafka-servers", "kafka:29092");
         final String datasetsTopic = params.get("datasets-topic", "datasets");
+        
+        // Observer Params
         final String modelReportsTopic = params.get("model-reports-topic", "factory_reports");
+        final long reportingDistance = params.getLong("reportingDistance", 600000); // 10 min
+        final double obsTrainDiff = params.getDouble("observer-train-diff", 0.05);
+        final double obsOptDiff = params.getDouble("observer-optimize-diff", 0.10);
+        final double obsLowScore = params.getDouble("observer-low-score", 0.5);
+        final int obsGrace = params.getInt("observer-grace", 3);
+        final String instructionsTopic = params.get("instructions-topic", "instructions");
 
         // Construct full path prefix for notifications
         final String pathPrefix = outputPath + "/" + namingPrefix;
 
         System.out.println("=== InferenceJob Configuration ===");
-        System.out.println("Initial Model Path: " + loadPath);
         System.out.println("Input Source: " + inputSource);
-        if ("file".equalsIgnoreCase(inputSource)) System.out.println("Input Path: " + inputPath);
-        else System.out.println("Input Topic: " + inputTopic);
-        System.out.println("Horizon: " + horizon);
-        System.out.println("Threshold: " + runConfidenceThreshold);
-        System.out.println("Max Spread: " + maxSpread);
-        System.out.println("--- Collector ---");
-        System.out.println("Output Path: " + outputPath);
-        System.out.println("Bucket Size (sec): " + bucketSizeSec);
-        System.out.println("Last K: " + lastK);
-        System.out.println("--- Kafka ---");
-        System.out.println("Kafka Servers: " + kafkaServers);
-        System.out.println("Datasets Topic: " + datasetsTopic);
-        System.out.println("Model Reports Topic: " + modelReportsTopic);
+        System.out.println("--- Observer ---");
+        System.out.println("Reporting Distance (ms): " + reportingDistance);
         System.out.println("==================================");
 
         // =========================================================================
@@ -128,20 +125,24 @@ public class InferenceJob {
             .withTimestampAssigner((event, timestamp) -> event.timestamp() * 1000L)
         );
 
-        // B. Model Updates (Kafka)
-        KafkaSource<String> modelSource = KafkaSource.<String>builder()
+        // B. Model Updates + Sync Commands (Kafka or Dummy)
+        DataStream<String> modelUpdateStream;
+        final String engineSyncTopic = params.get("enginesync-topic", "enginesync");
+        
+        if ("file".equalsIgnoreCase(inputSource)) {
+            // Bypass Kafka for Model Updates in File mode
+             modelUpdateStream = env.fromElements("dummy").filter(x -> false); 
+        } else {
+            // Consume from both factory_reports (model updates) and enginesync (pause/play)
+            KafkaSource<String> modelSource = KafkaSource.<String>builder()
                 .setBootstrapServers(kafkaServers)
-                .setTopics(modelReportsTopic)
+                .setTopics(modelReportsTopic, engineSyncTopic) // Multi-topic subscription
                 .setGroupId("inference-group-models")
                 .setStartingOffsets(OffsetsInitializer.latest())
                 .setValueOnlyDeserializer(new SimpleStringSchema())
                 .build();
-
-        DataStream<String> modelUpdateStream = env.fromSource(
-                modelSource, 
-                WatermarkStrategy.noWatermarks(), 
-                "Model Reports Source"
-        );
+            modelUpdateStream = env.fromSource(modelSource, WatermarkStrategy.noWatermarks(), "Model+Sync Source");
+        }
         
         // --- Broadcast for Dynamic Models ---
         BroadcastStream<String> broadcastStream = modelUpdateStream.broadcast(MODEL_UPDATE_DESCRIPTOR);
@@ -176,15 +177,18 @@ public class InferenceJob {
                 .windowAll(TumblingEventTimeWindows.of(Time.seconds(bucketSizeSec)))
                 .process(new DatasetNotificationProcess(lastK, pathPrefix));
 
-        KafkaSink<String> kafkaSink = KafkaSink.<String>builder()
+        if ("file".equalsIgnoreCase(inputSource)) {
+            notificationStream.print("NOTIFICATION");
+        } else {
+            KafkaSink<String> kafkaSink = KafkaSink.<String>builder()
                 .setBootstrapServers(kafkaServers)
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(datasetsTopic)
                         .setValueSerializationSchema(new SimpleStringSchema())
                         .build())
                 .build();
-
-        notificationStream.sinkTo(kafkaSink).name("Dataset Notifier (Kafka)");
+            notificationStream.sinkTo(kafkaSink).name("Dataset Notifier (Kafka)");
+        }
 
         // =========================================================================
         // 5. Branch C: Wayeb Engine (Detection & Forecasting with Dynamic Models)
@@ -196,7 +200,8 @@ public class InferenceJob {
                 loadPath,
                 horizon,
                 runConfidenceThreshold,
-                maxSpread
+                maxSpread,
+                reportingDistance
             ));
 
         DataStream<String> detectionStream = reportStream
@@ -205,10 +210,47 @@ public class InferenceJob {
         DataStream<PredictionOutput> predictionStream = reportStream
             .getSideOutput(WayebEngine.PRED_TAG);
 
-        reportStream.print("REPORT");
+        reportStream.print("LOCAL_REPORT");
         detectionStream.print("ALERT");
         predictionStream.print("FORECAST");
 
+        // =========================================================================
+        // 6. Branch D: In-Job Observer (Aggregation -> Decision)
+        // =========================================================================
+        
+        // 1. GLOBAL AGGREGATION (Map-Reduce)
+        DataStream<ReportOutput> globalReports = reportStream
+            .windowAll(TumblingEventTimeWindows.of(Time.milliseconds(reportingDistance)))
+            .reduce(new MetricsAggregator());
+            
+        globalReports.print("GLOBAL_REPORT");
+
+        // 2. OBSERVER DECISION
+        DataStream<String> instructions = globalReports
+            .keyBy(r -> "GLOBAL") // Dummy key to access KeyedState in Observer
+            .process(new ObserverProcess(
+                obsTrainDiff, 
+                obsOptDiff, 
+                obsLowScore, 
+                obsGrace
+            ));
+
+        instructions.print("INSTRUCTION");
+
+        // 3. KAFKA SINK
+        if ("file".equalsIgnoreCase(inputSource)) {
+            // Bypass instructions sink in file mode
+        } else {
+            KafkaSink<String> instructionsSink = KafkaSink.<String>builder()
+                .setBootstrapServers(kafkaServers)
+                .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+                        .setTopic(instructionsTopic)
+                        .setValueSerializationSchema(new SimpleStringSchema())
+                        .build())
+                .build();
+            instructions.sinkTo(instructionsSink).name("Observer (Instructions Sink)");
+        }
+        
         env.execute("RTCEF Inference Job");
     }
 }
