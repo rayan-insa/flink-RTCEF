@@ -65,14 +65,17 @@ import workflow.provider.SDFAProvider;
 import ui.ConfigUtils;
 
 /**
- * WayebEngine acts as a "Bridge" or "Wrapper".
+ * WayebEngine acts as a bridge between Apache Flink and the Wayeb Scala core.
  * 
- * Flink manages the distributed stream and fault tolerance.
- * Wayeb manages the complex event logic (Detection & Forecasting).
+ * It manages the lifecycle of Wayeb inference engines (Runs and Forecasters)
+ * within a Flink KeyedBroadcastProcessFunction. Flink provides the distributed
+ * stream management and fault tolerance, while this class handles the CER/CEF
+ * logic and dynamic model loading.
  * 
- * This class implements Dynamic Model Loading:
- * - processElement: Maritime events for inference.
- * - processBroadcastElement: Model update notifications from ModelFactory.
+ * Key responsibilities:
+ * 1. Performing inference on maritime events.
+ * 2. Managing state synchronization for distributed engines.
+ * 3. Handling real-time model updates via broadcast state.
  */
 public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEvent, String, ReportOutput> {
 
@@ -141,6 +144,12 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
         this.statsReportingDistance = statsReportingDistance;
     }
 
+    /**
+     * Loads the Wayeb model and associated forecasters from the specified path.
+     * 
+     * @param path The filesystem path to the model (.spst file).
+     * @throws Exception If model loading fails.
+     */
     private void loadWayebModels(String path) throws Exception {
         LOG.info("Loading model from: {}", path);
         
@@ -206,7 +215,10 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     }
 
     /**
-     * Process Maritime Events (Inference)
+     * Processes live maritime events for detection and forecasting.
+     * 
+     * Implements synchronization with broadcast state for model updates
+     * and handles engine pausing during optimization.
      */
     @Override
     public void processElement(GenericEvent event, ReadOnlyContext ctx, Collector<ReportOutput> out) throws Exception {
@@ -301,7 +313,10 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     }
 
     /**
-     * Process Model Update Notifications: Store in Broadcast State
+     * Processes control signals and model update notifications from Kafka.
+     * 
+     * Handles 'pause' and 'play' synchronization commands and identifies
+     * the latest available model for potential keyed swaps.
      */
     @Override
     public void processBroadcastElement(String jsonReport, Context ctx, Collector<ReportOutput> out) throws Exception {

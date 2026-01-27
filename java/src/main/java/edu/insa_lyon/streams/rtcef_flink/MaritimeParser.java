@@ -11,13 +11,11 @@ import scala.collection.immutable.Map$; // Factory for immutable maps
 import scala.collection.mutable.Builder;
 
 /**
- * Parser for maritime CSV data.
+ * Parser for maritime AIS data in CSV format.
  * 
- * Provides two modes:
- * 1. flatMap() - Returns GenericEvent for Wayeb pattern matching
- * (InferenceJob)
- * 2. parseLine() - Static method returning MaritimeEvent POJO for windowing
- * (CollectorJob)
+ * This component converts raw CSV lines into Wayeb {@link GenericEvent} objects, 
+ * mapping maritime fields (mmsi, lon, lat, etc.) to the symbolic attribute map 
+ * required for pattern matching and forecasting.
  */
 public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
 
@@ -30,7 +28,10 @@ public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
     }
 
     /**
-     * FlatMap function that outputs GenericEvent for Wayeb pattern matching.
+     * Converts a raw CSV string to a GenericEvent.
+     * 
+     * @param line Raw CSV input line.
+     * @param out Flink collector for emitted events.
      */
     @Override
     public void flatMap(String line, Collector<GenericEvent> out) {

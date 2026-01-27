@@ -18,12 +18,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * The Brain of the Loop.
+ * Monitors the global performance of the models in real-time.
  * 
- * Monitors the GLOBAL performance of the model (aggregated from all ships).
- * Decides when to trigger RETRAIN or OPTIMIZE instructions.
+ * This class decisions when to trigger model adaptations (RETRAIN/OPTIMIZE) based on
+ * the Matthew's Correlation Coefficient (MCC) calculated from inference results.
  * 
- * Logic adapted from original 'observer.py'.
+ * Key features:
+ * - Activity-aware assessment (ignores silent windows).
+ * - Trend-based drop detection.
+ * - Grace period management after model updates.
  */
 public class ObserverProcess extends KeyedProcessFunction<String, ReportOutput, String> {
 
@@ -59,6 +62,12 @@ public class ObserverProcess extends KeyedProcessFunction<String, ReportOutput, 
         mapper = new ObjectMapper();
     }
 
+    /**
+     * Processes aggregated performance reports and assesses model health.
+     * 
+     * Compares the current window's MCC against thresholds and history to detect
+     * performance degradation and emit adaptation instructions.
+     */
     @Override
     public void processElement(ReportOutput report, Context ctx, Collector<String> out) throws Exception {
         // New: Activity Discrimination

@@ -3,6 +3,9 @@ package edu.insa_lyon.streams.rtcef_flink.utils;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * Utility class for calculating classification performance metrics.
+ */
 public class Scores {
 
     /**
@@ -60,7 +63,6 @@ public class Scores {
         metrics.put("precision", precision);
         metrics.put("recall", recall);
         metrics.put("f1", f1);
-        metrics.put("mcc", mcc);
 
         return metrics;
     }

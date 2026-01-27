@@ -27,13 +27,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * CoProcessFunction that handles both Commands and Datasets streams.
+ * Core engine for model training and optimization in the Model Factory.
  * 
- * Stream 1 (processElement1): Commands from Controller (TRAIN, OPTIMIZE, etc.)
- * Stream 2 (processElement2): Datasets from Collector (bucket notifications)
- * 
- * The Factory maintains the current assembled dataset path in state
- * and uses it when processing training commands.
+ * This class handles:
+ * 1. Assembling datasets from time-bucketed CSV files.
+ * 2. Executing VMM (Variable Memory Markov) training using WayebAdapter.
+ * 3. Implementing the "Ask-Tell" Baysezian optimization protocol.
+ * 4. Managing dataset persistence and cleanup.
  */
 public class ModelFactoryEngine extends CoProcessFunction<String, String, String> {
 
@@ -204,13 +204,10 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
     }
 
     /**
-     * Process commands from Controller (train, opt_initialise, opt_step, opt_finalise)
+     * Processes commands from the Python Controller (TRAIN, OPT_INITIALISE, OPT_STEP, OPT_FINALISE).
      * 
-     * Protocol matches baseline factory.py:
-     * - train: Simple retraining with given params
-     * - opt_initialise: Start optimization, lock dataset
-     * - opt_step: Train+test with params, return metrics
-     * - opt_finalise: Re-train with best params, deploy final model
+     * This method implements the heavy computational part of the Bayesian optimization
+     * loop, including in-memory training and validation of candidate models.
      */
     @Override
     public void processElement1(String jsonCommand, Context ctx, Collector<String> out) throws Exception {
@@ -495,9 +492,10 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
     }
 
     /**
-     * Process datasets from Collector - update state and clean old files.
+     * Processes dataset notifications from the Collector.
      * 
-     * Matches `clean_old_datasets` logic from original `factory.py`.
+     * Triggers the immediate assembly of new buckets into a searchable dataset
+     * and performs cleanup of stale dataset files that are not currently locked.
      */
     @Override
     public void processElement2(String jsonDataset, Context ctx, Collector<String> out) throws Exception {

@@ -6,12 +6,11 @@ import edu.insa_lyon.streams.rtcef_flink.utils.Scores;
 import java.util.Map;
 
 /**
- * Aggregates "Partial" ReportOutputs from parallel WayebEngine instances into a "Global" ReportOutput.
+ * Aggregates partial performance reports into a global view.
  * 
- * Logic:
- * 1. Sums the Raw Counts (TP, TN, FP, FN) for both Runtime and Batch metrics.
- * 2. Recalculates the derived scores (F1, MCC, Precision, Recall) based on the new sums.
- * 3. Preserves the latest timestamp.
+ * This reducer sums raw confusion matrix counts (TP, TN, FP, FN) and 
+ * recalculates derived scores (MCC, F1, etc.) to ensure mathematical 
+ * correctness of the global metrics.
  */
 public class MetricsAggregator implements ReduceFunction<ReportOutput> {
 

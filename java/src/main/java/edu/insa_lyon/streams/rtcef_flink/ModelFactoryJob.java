@@ -14,8 +14,20 @@ import org.apache.flink.util.OutputTag;
 
 import java.util.Properties;
 
+/**
+ * Flink Job for training and optimizing Prediction Suffix Trees (PST).
+ * 
+ * This job coordinates with the Python Controller to perform hyperparameter 
+ * optimization (Bayesian search) and model re-training.
+ */
 public class ModelFactoryJob {
 
+    /**
+     * Main entry point for the Model Factory Job.
+     * 
+     * @param args Command line arguments.
+     * @throws Exception If job execution fails.
+     */
     public static void main(String[] args) throws Exception {
         final ParameterTool params = ParameterTool.fromArgs(args);
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();

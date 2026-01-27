@@ -24,17 +24,16 @@ import java.util.List;
 import java.util.Comparator;
 
 /**
- * Unified Collector Implementation with Feedback Loop.
+ * Stateful collector that buckets maritime events into time-indexed CSV files.
  * 
- * Replaces the purely count-based retention with an explicit Acknowledgement system.
+ * This component implements a wall-clock bucketing strategy and coordinates with
+ * the Model Factory via an asynchronous feedback loop (ACK) for safe data retention
+ * and cleanup.
  * 
- * Inputs:
- * 1. Maritime Events: Write to time-buckets.
- * 2. Assembly Reports (ACK): Confirm that a dataset (range of buckets) has been processed.
- * 
- * Cleanup Rule:
- * Only delete a bucket if its ID is strictly less than the START of the last processed range.
- * This guarantees that the Factory is "done" with it.
+ * Key responsibilities:
+ * 1. Writing incoming events to local CSV buckets.
+ * 2. Emitting dataset notifications when buckets are closed.
+ * 3. Safely deleting old buckets only after they are confirmed as processed by the Factory.
  */
 public class Collector extends CoProcessFunction<GenericEvent, String, String> {
 
@@ -109,9 +108,12 @@ public class Collector extends CoProcessFunction<GenericEvent, String, String> {
         }
     }
 
-    // =========================================================================
-    // Stream 1: Maritime Events (Write Logic)
-    // =========================================================================
+    /**
+     * Processes live maritime events and writes them to the current time bucket.
+     * 
+     * Triggers bucket transitions and notifications when event time passes the
+     * current bucket boundary.
+     */
     @Override
     public void processElement1(GenericEvent event, Context ctx, org.apache.flink.util.Collector<String> out) throws Exception {
         long eventTimeSec = event.timestamp(); // As input is seconds
@@ -126,9 +128,12 @@ public class Collector extends CoProcessFunction<GenericEvent, String, String> {
         writeRecordToBucket(bucketId, event);
     }
     
-    // =========================================================================
-    // Stream 2: Assembly Reports (Cleanup Logic)
-    // =========================================================================
+    /**
+     * Processes assembly acknowledgements (ACKs) from the Model Factory.
+     * 
+     * Updates the safe deletion threshold, allowing old buckets to be permanently
+     * removed from the filesystem.
+     */
     @Override
     public void processElement2(String jsonAck, Context ctx, org.apache.flink.util.Collector<String> out) throws Exception {
         try {

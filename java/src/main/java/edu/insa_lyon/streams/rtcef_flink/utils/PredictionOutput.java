@@ -1,12 +1,24 @@
 package edu.insa_lyon.streams.rtcef_flink.utils;
 
+/**
+ * POJO representing a forecasting prediction output.
+ * 
+ * Contains the probability of an event occurrence and the predicted
+ * time window relative to the current timestamp.
+ */
 public class PredictionOutput {
+    /** Event occurrence timestamp. */
     public long timestamp;
+    /** Unique key (e.g., MMSI) for the entity being monitored. */
     public String key;
+    /** Probability of the predicted event (0.0 to 1.0). */
     public double probability;
-    public int startIn;  // "Happens in X seconds" (start)
-    public int endIn;    // "Happens in Y seconds" (end)
-    public boolean isPositive; // For classification (Will it happen? Yes/No)
+    /** Predicted start time relative to now (in seconds). */
+    public int startIn;
+    /** Predicted end time relative to now (in seconds). */
+    public int endIn;
+    /** Binary classification result (Will it happen?). */
+    public boolean isPositive;
 
     public PredictionOutput() {}
 

@@ -265,6 +265,10 @@ log/.work/
 data/saved_models/
 data/buckets/
 data/datasets/
+data/maritime-eval.jsonl
 
 data/infer.csv
 data/train.csv
+
+
+.DS_Store

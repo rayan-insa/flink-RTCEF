@@ -6,7 +6,6 @@ import java.time.Duration;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.state.MapStateDescriptor;
-import org.apache.flink.connector.file.src.reader.TextLineInputFormat;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
@@ -47,15 +46,24 @@ public class InferenceJob {
     public static final MapStateDescriptor<String, String> MODEL_UPDATE_DESCRIPTOR = 
         new MapStateDescriptor<>("modelUpdates", Types.STRING, Types.STRING);
 
+    /**
+     * Main entry point for the RTCEF Inference Job.
+     * 
+     * @param args Command line arguments for Flink configuration.
+     * @throws Exception If job execution fails.
+     */
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         
-        // Enable Checkpointing (Critical for FileSink to roll on time)
+        // Enable Checkpointing (Critical for data persistence and recovery)
         env.enableCheckpointing(30000); // 30 seconds
         
-        // 1.5. Restart Strategy (Resilience)
-        // If the coordinator is lost, try 3 times before failing the job.
-        env.setRestartStrategy(RestartStrategies.failureRateRestart(3, org.apache.flink.api.common.time.Time.minutes(5), org.apache.flink.api.common.time.Time.seconds(10)));
+        // Configure Restart Strategy for fault tolerance
+        env.setRestartStrategy(RestartStrategies.failureRateRestart(
+            3, 
+            org.apache.flink.api.common.time.Time.minutes(5), 
+            org.apache.flink.api.common.time.Time.seconds(10)
+        ));
 
         // =========================================================================
         // 1. Parse Parameters
