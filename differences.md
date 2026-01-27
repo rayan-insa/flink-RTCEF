@@ -7,12 +7,14 @@ This document outlines the architectural and implementation differences between 
 ## 1. Model Synchronization Mechanism
 
 **Original**: "Stop-and-Go" via a synchronization topic (`pause` / `play`).
-**Flink**: Asynchronous "Transition Period" based on Event Time.
+**Flink**: Hybrid: Asynchronous "Transition Period" + Broadcast Control.
 
-* **Description**: In the original framework, inference is halted while a new model is loaded. In this Flink implementation, the `WayebEngine` continues processing using the old model until the stream reaches a specific `syncTimestamp` (calculated as `currentTime + productionTime`), at which point it swaps the model mid-stream.
-* **Justification**: Flink is designed for continuous, low-latency streaming. Blocking a job to wait for an external event (like model training) violates the streaming paradigm and complicates offset management.
-* **Pros**: Zero downtime for inference; eliminates the need for a blocking synchronization topic.
-* **Cons**: Introduit a "grace period" where an outdated model is used until the new one is activated.
+* **Description**:
+  * *Model Swaps*: The `WayebEngine` continues processing using the old model until the stream reaches a specific `syncTimestamp` (calculated as `currentTime + productionTime`), at which point it swaps the model mid-stream uniquely per key.
+  * *Optimization Phase*: An explicit **Broadcast PAUSE/PLAY** mechanism is implemented to freeze inference engines during the parameter search (Optimization sessions). This prevents engines from using unselected/temporary models during the training cycle.
+* **Justification**: Combines Flink's continuous streaming strengths with the original's need for isolation during critical re-training.
+* **Pros**: Zero downtime for standard refreshes; complete consistency during multi-step optimization loops.
+* **Cons**: Short periods of halted inference during optimization.
 
 ## 2. Data Collection Strategy (Collector)
 
@@ -90,6 +92,29 @@ This document outlines the architectural and implementation differences between 
 * **Description**: Flink uses Watermarks to handle late-arriving positions. This ensures that windows (for the Collector) and model swaps (for the Engine) occur based on the "logical" time of the data, not when the data arrives at the server.
 * **Pros**: Robustness against network delays or out-of-order Kafka partitions.
 * **Cons**: Correct Watermark generation is critical; a bad strategy can stall the entire pipeline.
+
+## 9. Data Quality Guards (Minimum Thresholds)
+
+**Original**: Variable or implicit data requirements.
+**Flink**: Explicit `MIN_DATA_THRESHOLD` enforcement.
+
+* **Description**: The `ModelFactoryEngine` verifies that the assembled dataset contains at least 1000 events before proceeding with training or optimization. If events < 1000, the session is skipped/aborted.
+* **Pros**: Prevents "noisy" model generation; stabilizes re-training in sparse data scenarios (e.g., ships at port).
+
+## 10. Model Lifecycle Management (Cleanup)
+
+**Original**: Manual cleanup of historical models.
+**Flink**: Automatic session-based cleanup.
+
+* **Description**: Post-optimization, the `ModelFactoryEngine` automatically identifies and deletes all intermediate candidate models (`.spst`) from the current session, retaining only the final "best" model.
+* **Pros**: Minimizes storage foot-print in production; keeps the `saved_models/` directory focused.
+
+## 11. Observer Discrimination Logic
+
+**Original**: Global aggregation of all events.
+**Flink**: Activity-aware filtering.
+
+* **Description**: The Observer ignores metric "batches" where no activity occurred (TP, FP, and FN are all zero). This prevents undefined MCC scores (NaN/0) from triggering unnecessary optimizations during data silences.
 
 ---
 *Note: This document reflects the current state of the architecture and is subject to updates as the framework evolves.*

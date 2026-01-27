@@ -1,8 +1,8 @@
 """
-Engine Sync Helper - Pause/Play mechanism for WayebEngine
+Engine Sync Helper.
 
-Sends synchronization commands to the `enginesync` Kafka topic to pause/play
-the inference engine during optimization procedures.
+Manages the pause/play synchronization protocol for WayebEngine through
+the `enginesync` Kafka topic during optimization cycles.
 """
 import json
 import logging

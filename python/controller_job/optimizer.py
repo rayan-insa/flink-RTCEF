@@ -1,24 +1,26 @@
 """
-Synchronous Hyperparameter Optimizer - Baseline-compatible implementation
+Hyperparameter Optimizer - Flink-Native State Machine Compatible
 
-This optimizer implements the synchronous multi-step optimization protocol:
-1. Pause engine
-2. Send opt_initialise to Factory
-3. Loop n_total_evals times:
-   - ASK: get next params from Bayesian model
-   - Send opt_step to Factory
-   - WAIT: block until Factory report arrives
-   - TELL: update Bayesian model with result
-4. Send opt_finalise(best_i) to Factory
-5. Play engine with new model
+This optimizer can be used in two modes:
+1. **Synchronous Mode**: run_optimization() for blocking loops (standalone scripts)
+2. **Event-Driven Mode**: Step-by-step methods for Flink state machine:
+   - init_session(): Start a new optimization session
+   - ask(): Get next params to try
+   - tell(f_val): Update Bayesian model with result
+   - get_best_i(): Get best iteration index
+   - get_state_snapshot(): Serialize optimizer state for Flink ValueState
+   - load_state_snapshot(): Restore optimizer state from serialized data
 
 Based on: external/rtcef/services/optimiser.py and libraries/optimisers/skopt_wrapper.py
 """
 import json
 import logging
-import time
+import pickle
+import base64
+from dataclasses import dataclass, field, asdict
+from enum import Enum
 from math import inf
-from typing import Optional, Callable, List, Dict, Any
+from typing import Optional, Callable, List, Dict, Any, Tuple
 
 from skopt import Optimizer
 from skopt.space import Real
@@ -27,11 +29,49 @@ from controller_job.models.instruction import Instruction, InstructionType
 from controller_job.sync import create_pause_command, create_play_command
 
 
+class OptimizationPhase(Enum):
+    """State machine phases for optimization."""
+    IDLE = "IDLE"
+    INITIALIZING = "INITIALIZING"
+    WAITING_FOR_REPORT = "WAITING_FOR_REPORT"
+    OPTIMIZING = "OPTIMIZING"
+    FINALIZING = "FINALIZING"
+
+
+@dataclass
+class OptimizationSession:
+    """
+    Serializable snapshot of an optimization session.
+    
+    This dataclass captures all state needed to resume an optimization
+    after Flink restarts or between event arrivals.
+    """
+    phase: str = OptimizationPhase.IDLE.value
+    current_iteration: int = 0
+    n_total_evals: int = 10
+    opt_model_params: List[List[float]] = field(default_factory=list)
+    best_i: int = 0
+    best_obj: float = inf
+    optimizer_pickle: str = ""  # Base64-encoded pickled skopt.Optimizer
+    timestamp: int = 0
+    optimize_counter: int = 0
+    
+    def to_json(self) -> str:
+        """Serialize to JSON string."""
+        return json.dumps(asdict(self))
+    
+    @classmethod
+    def from_json(cls, json_str: str) -> 'OptimizationSession':
+        """Deserialize from JSON string."""
+        data = json.loads(json_str)
+        return cls(**data)
+
+
 class HyperparameterOptimizer:
     """
-    Synchronous Optimizer using Scikit-Optimize (skopt) Ask-Tell pattern.
+    Stateless Optimizer using Scikit-Optimize (skopt) Ask-Tell pattern.
     
-    Implements the full optimization protocol with blocking waits for Factory reports.
+    Supports both synchronous (blocking) and event-driven (Flink state machine) modes.
     """
 
     # Default search space for Wayeb hyperparameters
@@ -58,14 +98,12 @@ class HyperparameterOptimizer:
         self.train_counter = 0
         self.optimize_counter = 0
         
-        # Optimizer state
+        # Optimizer state (transient - will be serialized via session)
         self.opt: Optional[Optimizer] = None
         self.current_best_params: Dict[str, float] = {'pMin': 0.05, 'gamma': 0.001}
         
-        # Optimization session state
-        self.opt_model_params: List[List[float]] = []
-        self.best_i: int = 0
-        self.best_obj: float = inf
+        # Session state (will be persisted in Flink ValueState)
+        self.session: Optional[OptimizationSession] = None
         
         self._initialize_optimizer()
 
@@ -88,6 +126,59 @@ class HyperparameterOptimizer:
         cid = self.command_counter
         self.command_counter += 1
         return f"cmd-{cid}"
+
+    # =========================================================================
+    # State Serialization (for Flink ValueState)
+    # =========================================================================
+
+    def _serialize_optimizer(self) -> str:
+        """Pickle and base64-encode the skopt Optimizer."""
+        if self.opt is None:
+            return ""
+        pickled = pickle.dumps(self.opt)
+        return base64.b64encode(pickled).decode('utf-8')
+    
+    def _deserialize_optimizer(self, encoded: str) -> Optional[Optimizer]:
+        """Restore skopt Optimizer from base64-encoded pickle."""
+        if not encoded:
+            return None
+        pickled = base64.b64decode(encoded.encode('utf-8'))
+        return pickle.loads(pickled)
+
+    def get_state_snapshot(self) -> str:
+        """
+        Get JSON-serializable snapshot of the current optimization session.
+        
+        Use this to persist state in Flink's ValueState between events.
+        """
+        if self.session is None:
+            return ""
+        # Update session with current optimizer state
+        self.session.optimizer_pickle = self._serialize_optimizer()
+        return self.session.to_json()
+    
+    def load_state_snapshot(self, snapshot_json: str) -> bool:
+        """
+        Restore optimization session from a JSON snapshot.
+        
+        Returns True if session was restored, False if no session to restore.
+        """
+        if not snapshot_json:
+            self.session = None
+            return False
+        
+        self.session = OptimizationSession.from_json(snapshot_json)
+        
+        # Restore the skopt Optimizer
+        if self.session.optimizer_pickle:
+            self.opt = self._deserialize_optimizer(self.session.optimizer_pickle)
+        
+        self.optimize_counter = self.session.optimize_counter
+        self.logger.info(
+            f"Restored session: phase={self.session.phase}, "
+            f"iteration={self.session.current_iteration}/{self.session.n_total_evals}"
+        )
+        return True
 
     # =========================================================================
     # Command Builders
@@ -145,196 +236,177 @@ class HyperparameterOptimizer:
         return cmd
 
     # =========================================================================
-    # Synchronous Optimization Loop
+    # Event-Driven API (for Flink State Machine)
     # =========================================================================
 
-    def run_optimization(
-        self,
-        timestamp: int,
-        send_command: Callable[[Dict], None],
-        wait_for_report: Callable[[], Dict],
-        send_sync: Callable[[str], None]
-    ) -> int:
+    def init_session(self, timestamp: int) -> Tuple[Dict, str]:
         """
-        Run the full synchronous optimization loop.
+        Start a new optimization session.
         
-        Args:
-            timestamp: Starting timestamp for the optimization
-            send_command: Callback to send command to Factory (via Kafka)
-            wait_for_report: Callback that blocks until Factory report arrives
-            send_sync: Callback to send sync command to Engine (pause/play)
-            
+        Call this when receiving an OPTIMIZE instruction.
+        
         Returns:
-            model_id of the final optimized model
+            Tuple of (opt_initialise command, pause_sync_command)
         """
-        self.logger.info(f"=== Starting Optimization Loop (n_evals={self.n_total_evals}) ===")
-        
-        # Reset session state
-        self.opt_model_params = []
-        self.best_i = 0
-        self.best_obj = inf
         self._initialize_optimizer()
         
-        # 1. Pause Engine
-        self.logger.info("Step 1: Pausing inference engine...")
-        send_sync(create_pause_command(timestamp))
+        self.session = OptimizationSession(
+            phase=OptimizationPhase.INITIALIZING.value,
+            current_iteration=0,
+            n_total_evals=self.n_total_evals,
+            opt_model_params=[],
+            best_i=0,
+            best_obj=inf,
+            optimizer_pickle="",
+            timestamp=timestamp,
+            optimize_counter=self.optimize_counter
+        )
         
-        # 2. Send opt_initialise
-        self.logger.info("Step 2: Sending opt_initialise to Factory...")
         init_cmd = self.build_opt_initialise_command(timestamp)
-        send_command(init_cmd)
+        pause_cmd = create_pause_command(timestamp)
         
-        # 3. Optimization Loop
-        self.logger.info(f"Step 3: Running {self.n_total_evals} optimization iterations...")
+        # Transition to WAITING_FOR_REPORT
+        self.session.phase = OptimizationPhase.WAITING_FOR_REPORT.value
         
-        for i in range(self.n_total_evals):
-            # ASK: Get next params from Bayesian model
-            next_params = self.opt.ask()
-            pMin, gamma = next_params
-            self.opt_model_params.append(next_params)
-            
-            self.logger.info(f"  Iteration {i}/{self.n_total_evals}: ASK -> pMin={pMin:.6f}, gamma={gamma:.6f}")
-            
-            # Send opt_step command
-            step_cmd = self.build_opt_step_command(timestamp, next_params)
-            send_command(step_cmd)
-            
-            # WAIT: Block until Factory report arrives
-            self.logger.info(f"  Waiting for Factory report...")
-            report = wait_for_report()
-            
-            # Extract metrics from report
-            metrics_str = report.get('metrics', '{}')
-            if isinstance(metrics_str, str):
-                metrics = json.loads(metrics_str)
-            else:
-                metrics = metrics_str
-            
-            f_val = metrics.get('f_val', 0.0)
-            
-            # TELL: Update Bayesian model
-            self.opt.tell(next_params, f_val)
-            self.logger.info(f"  TELL -> f_val={f_val:.4f}")
-            
-            # Track best
-            if f_val < self.best_obj:
-                self.best_i = i
-                self.best_obj = f_val
-                self.logger.info(f"  New best! iteration={i}, f_val={f_val:.4f}")
-        
-        # 4. Send opt_finalise with best_i
-        self.logger.info(f"Step 4: Sending opt_finalise (best_i={self.best_i}, best_obj={self.best_obj:.4f})...")
-        finalise_cmd = self.build_opt_finalise_command(timestamp, self.best_i)
-        send_command(finalise_cmd)
-        
-        # Wait for final report with model_id
-        final_report = wait_for_report()
-        model_id = final_report.get('model_id', 0)
-        
-        # Update current best params
-        params_str = final_report.get('params_dict', '{}')
-        if isinstance(params_str, str) and params_str:
-            self.current_best_params = json.loads(params_str)
-        
-        # 5. Play Engine with new model
-        self.logger.info(f"Step 5: Resuming inference engine with model_id={model_id}...")
-        send_sync(create_play_command(timestamp, model_id))
-        
-        self.logger.info(f"=== Optimization Complete! Final model_id={model_id} ===")
-        return model_id
+        self.logger.info(f"init_session: Starting optimization at ts={timestamp}")
+        return init_cmd, pause_cmd
 
-    # =========================================================================
-    # Simple Train (for RETRAIN instruction)
-    # =========================================================================
-
-    def run_train(
-        self,
-        timestamp: int,
-        params: Optional[Dict[str, float]],
-        send_command: Callable[[Dict], None],
-        wait_for_report: Callable[[], Dict],
-        send_sync: Callable[[str], None]
-    ) -> int:
+    def ask(self) -> Tuple[List[float], Dict]:
         """
-        Run a simple train command (not optimization).
+        ASK: Get next hyperparameters to try.
+        
+        Call this after receiving a Factory report during optimization.
+        
+        Returns:
+            Tuple of (params [pMin, gamma], opt_step command)
+        """
+        if self.session is None:
+            raise RuntimeError("No active optimization session. Call init_session() first.")
+        
+        if self.opt is None:
+            raise RuntimeError("Optimizer not initialized")
+        
+        next_params = self.opt.ask()
+        pMin, gamma = next_params
+        
+        self.session.opt_model_params.append(next_params)
+        
+        step_cmd = self.build_opt_step_command(self.session.timestamp, next_params)
+        
+        # Update session state
+        self.session.phase = OptimizationPhase.WAITING_FOR_REPORT.value
+        
+        self.logger.info(
+            f"ask: Iteration {self.session.current_iteration} -> "
+            f"pMin={pMin:.6f}, gamma={gamma:.6f}"
+        )
+        return next_params, step_cmd
+
+    def tell(self, f_val: float) -> bool:
+        """
+        TELL: Update Bayesian model with the result of the last iteration.
+        
+        Call this after receiving a Factory report with metrics.
         
         Args:
-            timestamp: Timestamp for the train
-            params: Parameters to use (or None for current_best_params)
-            send_command: Callback to send command to Factory
-            wait_for_report: Callback that blocks until Factory report arrives
-            send_sync: Callback to send sync command to Engine
+            f_val: The objective function value (loss) from the Factory
             
         Returns:
-            model_id of the newly trained model
+            True if optimization should continue, False if all iterations done
         """
-        self.logger.info("=== Running Simple Train ===")
+        if self.session is None:
+            raise RuntimeError("No active optimization session")
         
-        # Use provided params or defaults
-        train_params = params or self.current_best_params
+        if self.opt is None:
+            raise RuntimeError("Optimizer not initialized")
         
-        # Pause Engine
-        send_sync(create_pause_command(timestamp))
+        # Get the last params we asked for
+        if not self.session.opt_model_params:
+            raise RuntimeError("No params recorded - call ask() first")
         
-        # Send train command
-        train_cmd = self.build_train_command(timestamp, train_params)
-        send_command(train_cmd)
+        last_params = self.session.opt_model_params[-1]
         
-        # Wait for report
-        report = wait_for_report()
-        model_id = report.get('model_id', 0)
+        # Update Bayesian model
+        self.opt.tell(last_params, f_val)
         
-        # Play Engine with new model
-        send_sync(create_play_command(timestamp, model_id))
-        
-        self.logger.info(f"=== Train Complete! model_id={model_id} ===")
-        return model_id
-
-    # =========================================================================
-    # Legacy API (for backward compatibility with event-driven code)
-    # =========================================================================
-
-    def create_command(self, instruction: Instruction) -> Optional[Dict]:
-        """
-        Legacy API: Create a single command from instruction.
-        
-        Note: This does NOT run the full optimization loop.
-        For full optimization, use run_optimization().
-        """
-        if instruction.instruction_type == InstructionType.RETRAIN:
-            params = {
-                'pMin': instruction.parameters.get('pMin', 0.05),
-                'gamma': instruction.parameters.get('gamma', 0.001)
-            }
-            return self.build_train_command(instruction.timestamp, params)
-        
-        elif instruction.instruction_type == InstructionType.OPTIMIZE:
-            # Return opt_initialise - caller must handle the loop
-            self.logger.warning(
-                "create_command() called for OPTIMIZE. "
-                "Consider using run_optimization() for full sync loop."
+        # Track best
+        if f_val < self.session.best_obj:
+            self.session.best_i = self.session.current_iteration
+            self.session.best_obj = f_val
+            self.logger.info(
+                f"tell: New best! iteration={self.session.current_iteration}, "
+                f"f_val={f_val:.4f}"
             )
-            return self.build_opt_initialise_command(instruction.timestamp)
         
-        elif instruction.instruction_type == InstructionType.UPDATE_PARAMS:
-            # Not a Factory command - just update local state
-            self.current_best_params.update(instruction.parameters)
-            return None
+        # Advance iteration
+        self.session.current_iteration += 1
         
-        return None
+        # Check if we should continue
+        should_continue = self.session.current_iteration < self.session.n_total_evals
+        
+        if should_continue:
+            self.session.phase = OptimizationPhase.OPTIMIZING.value
+        else:
+            self.session.phase = OptimizationPhase.FINALIZING.value
+        
+        self.logger.info(
+            f"tell: f_val={f_val:.4f}, iteration {self.session.current_iteration}/"
+            f"{self.session.n_total_evals}, continue={should_continue}"
+        )
+        return should_continue
 
-    def update_model(self, report: Dict):
+    def finalize(self) -> Tuple[Dict, int]:
         """
-        Legacy API: Update optimizer state from Factory report.
+        Finalize the optimization session.
         
-        Note: In sync mode, this is handled inside run_optimization().
+        Call this when tell() returns False (all iterations complete).
+        
+        Returns:
+            Tuple of (opt_finalise command, best_i)
         """
-        status = report.get('status', 'success')
-        if status == 'success':
-            metrics = report.get('metrics', {})
-            if isinstance(metrics, str):
-                metrics = json.loads(metrics)
-            
-            f_val = metrics.get('f_val')
-            if f_val is not None:
-                self.logger.info(f"Legacy update_model: f_val={f_val}")
+        if self.session is None:
+            raise RuntimeError("No active optimization session")
+        
+        best_i = self.session.best_i
+        finalise_cmd = self.build_opt_finalise_command(self.session.timestamp, best_i)
+        
+        self.logger.info(
+            f"finalize: best_i={best_i}, best_obj={self.session.best_obj:.4f}"
+        )
+        return finalise_cmd, best_i
+
+    def complete_session(self, model_id: int) -> str:
+        """
+        Complete the optimization session after receiving final Factory report.
+        
+        Returns:
+            play_sync_command
+        """
+        if self.session is None:
+            raise RuntimeError("No active optimization session")
+        
+        play_cmd = create_play_command(self.session.timestamp, model_id)
+        
+        self.logger.info(f"complete_session: Resuming with model_id={model_id}")
+        
+        # Clear session
+        self.session = None
+        
+        return play_cmd
+
+    def get_phase(self) -> OptimizationPhase:
+        """Get current optimization phase."""
+        if self.session is None:
+            return OptimizationPhase.IDLE
+        return OptimizationPhase(self.session.phase)
+
+    def get_best_i(self) -> int:
+        """
+        Get the iteration index of the best result found so far.
+        
+        Returns:
+            int: The index of the best iteration.
+        """
+        if self.session is None:
+            return 0
+        return self.session.best_i

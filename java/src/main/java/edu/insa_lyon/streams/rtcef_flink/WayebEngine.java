@@ -10,6 +10,9 @@ import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import edu.insa_lyon.streams.rtcef_flink.utils.ReportOutput;
 import edu.insa_lyon.streams.rtcef_flink.utils.PredictionOutput;
 import edu.insa_lyon.streams.rtcef_flink.utils.Scores;
@@ -21,6 +24,7 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.Obje
 import java.util.ArrayList;
 // Standard Java Imports
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.lang.reflect.Field;
@@ -52,12 +56,13 @@ import scala.Tuple3;
 import workflow.provider.FSMProvider;
 import workflow.provider.WtProvider;
 import workflow.provider.ForecasterProvider;
-import workflow.provider.source.wt.WtSourceMatrix;
+import workflow.provider.SPSTProvider;
+import workflow.provider.source.wt.WtSourceSPST;
 import workflow.provider.source.forecaster.ForecasterSourceBuild;
-import workflow.provider.source.matrix.MCSourceSerialized;
+import workflow.provider.source.spst.SPSTSourceSerialized;
 import workflow.provider.source.sdfa.SDFASourceSerialized;
 import workflow.provider.SDFAProvider;
-import workflow.provider.MarkovChainProvider;
+import ui.ConfigUtils;
 
 /**
  * WayebEngine acts as a "Bridge" or "Wrapper".
@@ -70,6 +75,9 @@ import workflow.provider.MarkovChainProvider;
  * - processBroadcastElement: Model update notifications from ModelFactory.
  */
 public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEvent, String, ReportOutput> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(WayebEngine.class);
+
     // =========================================================================
     // 1. Configuration (The Blueprint)
     // =========================================================================
@@ -77,7 +85,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     private final int horizon;
     private final double runConfidenceThreshold;
     private final int maxSpread;
-    private final boolean finalsEnabled = false;
+    private final boolean finalsEnabled = true;
     private final long statsReportingDistance;
     public static final OutputTag<String> MATCH_TAG = new OutputTag<String>("detections"){};
     public static final OutputTag<PredictionOutput> PRED_TAG = new OutputTag<PredictionOutput>("predictions"){};
@@ -134,20 +142,26 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     }
 
     private void loadWayebModels(String path) throws Exception {
-        System.out.println("[WayebEngine] Loading model from: " + path);
+        LOG.info("Loading model from: {}", path);
         
-        SDFASourceSerialized sdfaSource = SDFASourceSerialized.apply(path);
-        SDFAProvider sdfaProvider = SDFAProvider.apply(sdfaSource);
-        FSMProvider fsmProvider = FSMProvider.apply(sdfaProvider);
+        // Load SPST directly (VMM Logic - Aligned with Baseline)
+        SPSTSourceSerialized spstSource = SPSTSourceSerialized.apply(path);
+        SPSTProvider spstProvider = SPSTProvider.apply(spstSource);
+        FSMProvider fsmProvider = FSMProvider.apply(spstProvider);
 
         List<FSMInterface> fsmList = JavaConverters.seqAsJavaList(fsmProvider.provide());
         this.fsm = fsmList.get(0);
 
-        MarkovChainProvider markovChainProvider = MarkovChainProvider
-                .apply(MCSourceSerialized.apply(path + ".mc"));
-        
-        WtProvider wtp = WtProvider
-                .apply(WtSourceMatrix.apply(fsmProvider, markovChainProvider, horizon, finalsEnabled));
+        // Setup WtProvider via SPST (VMM Logic)
+        // Note: distance must be a Scala Tuple2
+        scala.Tuple2<Object, Object> distance = new scala.Tuple2<>(0.0, 1.0);
+        WtSourceSPST wtSource = WtSourceSPST.apply(
+            spstProvider, 
+            horizon, 
+            0.001, // approximate cutoff
+            distance
+        );
+        WtProvider wtp = WtProvider.apply(wtSource);
 
         Enumeration.Value methodEnum = ForecastMethod.CLASSIFY_NEXTK();
         this.predProvider = ForecasterProvider.apply(
@@ -160,11 +174,11 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
                         methodEnum));
         
         if (runEngine != null) {
-            System.out.println("[WayebEngine] Swapping running engines to new model...");
+            LOG.info("Swapping running engines to new model...");
             Tuple5<fsm.symbolic.sra.Configuration, Object, CyclicBuffer, Match, Object> snapshot = runEngine.snapshotState();
             initializeEngineInternal(null); 
             runEngine.restoreState(snapshot._1(), (Boolean)snapshot._2(), snapshot._3(), snapshot._4(), (Long)snapshot._5());
-            System.out.println("[WayebEngine] Engine swapped successfully.");
+            LOG.info("Engine swapped successfully.");
         }
     }
 
@@ -198,35 +212,17 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     public void processElement(GenericEvent event, ReadOnlyContext ctx, Collector<ReportOutput> out) throws Exception {
         this.lastEventTime = event.timestamp();
         
-        // 0. Check if engine is PAUSED (during optimization)
-        Boolean paused = pausedState.value();
-        if (paused != null && paused) {
-            // Engine is paused - skip processing (events are dropped during optimization)
-            // A more sophisticated impl could buffer events
-            return;
-        }
-        
-        // 0.5. Check for SYNC commands (pause/play) in broadcast state
+        // 1. Check for SYNC commands (pause/play) in broadcast state FIRST
         ReadOnlyBroadcastState<String, String> bState = ctx.getBroadcastState(InferenceJob.MODEL_UPDATE_DESCRIPTOR);
         String syncJson = bState.get("SYNC");
         if (syncJson != null) {
-            ObjectMapper m = getMapper();
-            JsonNode syncRoot = m.readTree(syncJson);
-            String syncType = syncRoot.path("type").asText();
-            
-            if ("pause".equalsIgnoreCase(syncType)) {
-                if (paused == null || !paused) {
-                    System.out.println("[WayebEngine] Key=" + ctx.getCurrentKey() + " PAUSING due to optimization");
-                    pausedState.update(true);
-                    return; // Skip processing
-                }
-            } else if ("play".equalsIgnoreCase(syncType)) {
-                if (paused != null && paused) {
-                    System.out.println("[WayebEngine] Key=" + ctx.getCurrentKey() + " RESUMING after optimization");
-                    pausedState.update(false);
-                    // Continue processing - don't return
-                }
-            }
+            handleSyncCommand(syncJson, ctx.getCurrentKey());
+        }
+
+        // 2. Check if engine is PAUSED
+        Boolean paused = pausedState.value();
+        if (paused != null && paused) {
+            return; // Skip processing while paused
         }
         
         // 1. Check for NEW BROADCAST MODELS that haven't been scheduled for this key yet
@@ -235,19 +231,24 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
         if (latestUpdateJson != null) {
             ObjectMapper m = getMapper();
             JsonNode root = m.readTree(latestUpdateJson);
+            // Only schedule swap if a valid path is provided (skip trial models without paths)
             String newPath = root.path("model_path").asText();
-            
-            // If this update is different from the one currently active or already scheduled
             String alreadyScheduled = scheduledModelPathState.value();
-            if (!newPath.equals(currentModelPathState.value()) && !newPath.equals(alreadyScheduled)) {
+            if (!newPath.isEmpty() && !newPath.equals(currentModelPathState.value()) && !newPath.equals(alreadyScheduled)) {
                 long productionTime = root.path("pt").asLong(0);
                 long syncTime = event.timestamp() + (productionTime / 1000); 
-                
-                System.out.println("[WayebEngine] Key=" + ctx.getCurrentKey() + " Scheduling model swap to " + newPath + " at T=" + syncTime);
+
+                LOG.info("Key={} Scheduling model swap to {} at T={}", ctx.getCurrentKey(), newPath, syncTime);
                 pendingModelPathState.update(newPath);
                 syncTimestampState.update(syncTime);
                 scheduledModelPathState.update(newPath);
             }
+        }
+
+        // Heartbeat check for engine aliveness (every 10 events for high visibility)
+        Long count = counterState.value();
+        if (count != null && count % 10 == 0) {
+           LOG.info("Engine Heartbeat: Key={} count={} lastTS={}", ctx.getCurrentKey(), count, event.timestamp());
         }
 
         // 2. Initial Load Check
@@ -263,9 +264,14 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
         Long syncTime = syncTimestampState.value();
         if (syncTime != null && event.timestamp() >= syncTime) {
             String pendingPath = pendingModelPathState.value();
-            System.out.println("[WayebEngine] Key=" + ctx.getCurrentKey() + " Sync reached (" + event.timestamp() + " >= " + syncTime + "). Swapping.");
+            LOG.info("Key={} Sync reached ({} >= {}). Swapping.", ctx.getCurrentKey(), event.timestamp(), syncTime);
             loadWayebModels(pendingPath);
             currentModelPathState.update(pendingPath);
+
+            // CRITICAL: Reset statistics history for the new model
+            statsHistoryState.clear();
+            statsOffsetState.clear();
+
             syncTimestampState.clear();
             pendingModelPathState.clear();
         }
@@ -306,7 +312,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
             // Handle SYNC commands (pause/play) from Controller
             String syncType = root.path("type").asText();
             if ("pause".equalsIgnoreCase(syncType)) {
-                System.out.println("[WayebEngine] Broadcast: PAUSE received - pausing inference");
+                LOG.info("Broadcast: PAUSE received - pausing inference");
                 // Store in broadcast state for all keyed instances to see
                 BroadcastState<String, String> bState = ctx.getBroadcastState(InferenceJob.MODEL_UPDATE_DESCRIPTOR);
                 bState.put("SYNC", jsonReport);
@@ -314,7 +320,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
             } else if ("play".equalsIgnoreCase(syncType)) {
                 String modelPath = root.path("model_path").asText();
                 int modelId = root.path("model_id").asInt(-1);
-                System.out.println("[WayebEngine] Broadcast: PLAY received - resuming with model_id=" + modelId);
+                LOG.info("Broadcast: PLAY received - resuming with model_id={}", modelId);
                 BroadcastState<String, String> bState = ctx.getBroadcastState(InferenceJob.MODEL_UPDATE_DESCRIPTOR);
                 bState.put("SYNC", jsonReport);
                 // If a new model path is provided, also store it as LATEST for loading
@@ -327,7 +333,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
             // Handle Model Update notifications (existing logic)
             if ("success".equalsIgnoreCase(root.path("status").asText())) {
                 String newPath = root.path("model_path").asText();
-                System.out.println("[WayebEngine] Broadcast: New model available at " + newPath);
+                LOG.info("Broadcast: New model available at {}", newPath);
                 
                 // Put it in broadcast state so all keys can see it in processElement
                 BroadcastState<String, String> bState = ctx.getBroadcastState(InferenceJob.MODEL_UPDATE_DESCRIPTOR);
@@ -378,7 +384,19 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
             statsHistoryState.update(new long[] { tp, tn, fp, fn });
 
             Map<String, Double> runtimeScores = Scores.getMetrics(tp, tn, fp, fn);
-            Map<String, Double> batchScores = Scores.getMetrics(batchTP, batchTN, batchFP, batchFN);
+            
+            // Handle Batch Scores defensively (tp + fp + fn == 0 means no activity or only TNs)
+            Map<String, Double> batchScores;
+            if (batchTP + batchFP + batchFN == 0) {
+                // Return a map with 0.0 for MCC to avoid NaN/Infinity
+                batchScores = new HashMap<>();
+                batchScores.put("precision", 0.0);
+                batchScores.put("recall", 0.0);
+                batchScores.put("f1", 0.0);
+                batchScores.put("mcc", 0.0);
+            } else {
+                batchScores = Scores.getMetrics(batchTP, batchTN, batchFP, batchFN);
+            }
 
             ReportOutput.MetricGroup runtimeGroup = new ReportOutput.MetricGroup(
                 tp, tn, fp, fn, runtimeScores.get("precision"), runtimeScores.get("recall"), runtimeScores.get("f1"), runtimeScores.get("mcc")
@@ -387,6 +405,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
                 batchTP, batchTN, batchFP, batchFN, batchScores.get("precision"), batchScores.get("recall"), batchScores.get("f1"), batchScores.get("mcc")
             );
 
+            LOG.info("LOCAL REPORT Key={} Runtime_MCC={} Batch_MCC={}", key, runtimeScores.get("mcc"), batchScores.get("mcc"));
             out.collect(new ReportOutput(currentTime, key, runtimeGroup, batchGroup));
             nextReportTimeState.update(currentTime + statsReportingDistance);
         }
@@ -427,6 +446,25 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
 
         if (confState.value() != null) {
             runEngine.restoreState(confState.value(), startedState.value(), bufferState.value(), matchState.value(), counterState.value());
+        }
+    }
+
+    private void handleSyncCommand(String syncJson, String currentKey) throws Exception {
+        ObjectMapper m = getMapper();
+        JsonNode syncRoot = m.readTree(syncJson);
+        String syncType = syncRoot.path("type").asText();
+        Boolean paused = pausedState.value();
+
+        if ("pause".equalsIgnoreCase(syncType)) {
+            if (paused == null || !paused) {
+                LOG.info("Key={} PAUSING due to optimization", currentKey);
+                pausedState.update(true);
+            }
+        } else if ("play".equalsIgnoreCase(syncType)) {
+            if (paused != null && paused) {
+                LOG.info("Key={} RESUMING after optimization", currentKey);
+                pausedState.update(false);
+            }
         }
     }
 }

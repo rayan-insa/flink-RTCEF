@@ -8,6 +8,9 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.util.Collector;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import edu.insa_lyon.streams.rtcef_flink.utils.ReportOutput;
 import java.util.ArrayList;
 import java.util.List;
@@ -23,6 +26,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * Logic adapted from original 'observer.py'.
  */
 public class ObserverProcess extends KeyedProcessFunction<String, ReportOutput, String> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ObserverProcess.class);
 
     // Thresholds (could be parameterized)
     private final double trainDiffThreshold; // traind
@@ -56,6 +61,17 @@ public class ObserverProcess extends KeyedProcessFunction<String, ReportOutput, 
 
     @Override
     public void processElement(ReportOutput report, Context ctx, Collector<String> out) throws Exception {
+        // New: Activity Discrimination
+        // If no relevant events in this window (TP+FP+FN == 0), skip assessment to avoid false alarms.
+        if (report.batch.tp + report.batch.fp + report.batch.fn == 0) {
+            LOG.debug("Silent window (Key={}). Ignoring MCC for decision.", report.key);
+            Integer grace = gracePeriodState.value();
+            if (grace != null && grace > 0) {
+                gracePeriodState.update(grace - 1);
+            }
+            return; 
+        }
+
         // 1. Get Metric (Using MCC from BATCH/Window as it is the most reactive)
         double currentScore = report.batch.mcc; 
         
@@ -69,13 +85,16 @@ public class ObserverProcess extends KeyedProcessFunction<String, ReportOutput, 
             scores.remove(0);
         }
         scoreHistoryState.update(scores);
-
+        
         // 3. Grace Period Check
         Integer grace = gracePeriodState.value();
         if (grace == null) grace = 0;
-        
+
+        // Log heartbeat every report for high visibility during development
+        LOG.info("Observer Heartbeat: Key={} Current Score (MCC)={}. (Grace Period Slots: {})", report.key, currentScore, grace);
+
         if (grace > 0) {
-            System.out.println("[Observer] In Grace Period (" + grace + " remaining). Ignoring score " + currentScore);
+            LOG.debug("In Grace Period ({} remaining). Ignoring score {}", grace, currentScore);
             gracePeriodState.update(grace - 1);
             return;
         }
@@ -86,7 +105,7 @@ public class ObserverProcess extends KeyedProcessFunction<String, ReportOutput, 
         // A. Low Score Safety Net
         if (currentScore < lowScoreThreshold) {
             decision = "optimize";
-            System.out.println("[Observer] Low Score Alert! " + currentScore + " < " + lowScoreThreshold);
+            LOG.warn("Low Score Alert! {} < {}", currentScore, lowScoreThreshold);
         }
         // B. Difference Method (Drop Detection)
         else if (scores.size() >= 2) {
@@ -97,10 +116,10 @@ public class ObserverProcess extends KeyedProcessFunction<String, ReportOutput, 
             // Positive diff means score dropped
             if (diff > optDiffThreshold) {
                 decision = "optimize";
-                System.out.println("[Observer] Major Drop detected (" + diff + "). Optimize.");
+                LOG.info("Major Drop detected (diff={}). Decision: OPTIMIZE", diff);
             } else if (diff > trainDiffThreshold) {
                 decision = "retrain"; 
-                System.out.println("[Observer] Minor Drop detected (" + diff + "). Retrain.");
+                LOG.info("Minor Drop detected (diff={}). Decision: RETRAIN", diff);
             }
         }
 

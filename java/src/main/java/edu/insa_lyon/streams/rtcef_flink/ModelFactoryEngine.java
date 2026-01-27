@@ -6,9 +6,15 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.co.CoProcessFunction;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
-import ui.WayebBridge;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
 
 import java.io.File;
 import java.io.FileWriter;
@@ -31,6 +37,8 @@ import java.util.List;
  */
 public class ModelFactoryEngine extends CoProcessFunction<String, String, String> {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ModelFactoryEngine.class);
+
     // State: Path to the current assembled dataset (assembled_dataset_version_<v>.csv)
     private transient ValueState<String> currentAssembledDatasetState;
     
@@ -48,9 +56,26 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
     
     // Cached path to extracted pattern file
     private transient String extractedPatternPath;
+    private transient String extractedDeclarationsPath;
     
     // JSON Mapper (transient for serialization)
     private transient ObjectMapper mapper;
+
+    // Config Params (aligned with InferenceJob)
+    private final int horizon;
+    private final double runConfidenceThreshold;
+    private final int maxSpread;
+    private final OutputTag<String> assemblyTag;
+    
+    // Minimum Data threshold for training (Phase 2)
+    private static final int MIN_DATA_THRESHOLD = 1000;
+
+    public ModelFactoryEngine(OutputTag<String> assemblyTag, int horizon, double runConfidenceThreshold, int maxSpread) {
+        this.assemblyTag = assemblyTag;
+        this.horizon = horizon;
+        this.runConfidenceThreshold = runConfidenceThreshold;
+        this.maxSpread = maxSpread;
+    }
 
     private ObjectMapper getMapper() {
         if (mapper == null) {
@@ -75,7 +100,7 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
         Files.copy(is, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
         is.close();
         
-        System.out.println("Extracted resource " + resourcePath + " to " + tempFile.getAbsolutePath());
+        LOG.debug("Extracted resource {} to {}", resourcePath, tempFile.getAbsolutePath());
         return tempFile.getAbsolutePath();
     }
 
@@ -91,12 +116,12 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
      */
     private String assembleDataset(String pathPrefix, List<Long> bucketsRange, long version) throws IOException {
         // We use a specific directory for assembled datasets to manage them better
-        String baseDir = "/opt/flink/data/assembled_datasets";
+        String baseDir = "/opt/flink/data/datasets";
         Files.createDirectories(Paths.get(baseDir));
         
-        File assembledFile = new File(baseDir, "assembled_dataset_version_" + version + ".csv");
+        File assembledFile = new File(baseDir, "dataset_version_" + version + ".csv");
         
-        System.out.println("[ModelFactoryEngine] Assembling dataset v" + version + " from " + bucketsRange.size() + " buckets...");
+        // LOG.info("Assembling dataset v{} from {} buckets...", version, bucketsRange.size());
         
         try (FileWriter writer = new FileWriter(assembledFile)) {
             for (Long bucketId : bucketsRange) {
@@ -104,29 +129,42 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
                 java.nio.file.Path bucketPath = Paths.get(bucketDir);
                 
                 if (!Files.exists(bucketPath)) {
-                    System.out.println("  WARNING: Bucket directory does not exist: " + bucketDir);
+                    LOG.warn("Bucket does not exist: {}", bucketDir);
                     continue;
                 }
-                
-                // List all part-* files in the bucket directory
-                Files.list(bucketPath)
-                    .filter(p -> p.getFileName().toString().startsWith("part-"))
-                    .sorted()
-                    .forEach(partFile -> {
-                        try {
-                            List<String> lines = Files.readAllLines(partFile);
-                            for (String line : lines) {
-                                writer.write(line);
-                                writer.write(System.lineSeparator());
-                            }
-                        } catch (IOException e) {
-                            System.err.println("  ERROR reading " + partFile + ": " + e.getMessage());
-                        }
-                    });
+
+                // Handle both flat files (New Collector) and Directories (Legacy/Parallel)
+                if (Files.isDirectory(bucketPath)) {
+                    // Directory: List and concatenate children
+                    Files.list(bucketPath)
+                        .sorted()
+                        .forEach(p -> {
+                             try {
+                                 List<String> lines = Files.readAllLines(p);
+                                 for (String line : lines) {
+                                     writer.write(line);
+                                     writer.write(System.lineSeparator());
+                                 }
+                             } catch (IOException e) {
+                                 LOG.error("Error reading part file: " + e.getMessage());
+                             }
+                        });
+                } else {
+                    // Flat File: Append directly
+                    try {
+                         List<String> lines = Files.readAllLines(bucketPath);
+                         for (String line : lines) {
+                             writer.write(line);
+                             writer.write(System.lineSeparator());
+                         }
+                     } catch (IOException e) {
+                         LOG.error("Error reading bucket file: " + e.getMessage());
+                     }
+                }
             }
         }
         
-        System.out.println("[ModelFactoryEngine] Assembled: " + assembledFile.getAbsolutePath());
+        // LOG.info("Assembled: {}", assembledFile.getAbsolutePath());
         return assembledFile.getAbsolutePath();
     }
 
@@ -162,6 +200,7 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
         optModelParams = new ArrayList<>();
         
         extractedPatternPath = extractResource("/patterns/enteringArea/pattern.sre");
+        extractedDeclarationsPath = extractResource("/patterns/enteringArea/declarations.sre");
     }
 
     /**
@@ -183,6 +222,7 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
             if (cmdType == null || cmdType.isEmpty()) {
                 cmdType = rootNode.path("command").asText(); // fallback
             }
+            LOG.info("FACTORY RECEIVED COMMAND: type={}", cmdType);
             
             String cmdId = rootNode.path("id").asText();
             
@@ -217,9 +257,29 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
                 }
                 
                 String modelPath = "/opt/flink/data/saved_models/wayeb_model_" + lastModelId + ".spst";
+                LOG.info("TRAIN: In-Memory VMM Training pMin={}, gamma={}", pMin, gamma);
                 
-                System.out.println("[Factory] TRAIN: pMin=" + pMin + ", gamma=" + gamma);
-                WayebBridge.train(datasetPath, modelPath, extractedPatternPath, pMin, gamma, 0.001, 1.05);
+                // 1. Load Data
+                List<stream.GenericEvent> events = loadEvents(datasetPath);
+
+                // Minimum Data Guard (Phase 2)
+                if (events.size() < MIN_DATA_THRESHOLD) {
+                    LOG.warn("TRAIN SKIPPED: Insufficient data density ({} < {}). Noisy model risk.", events.size(), MIN_DATA_THRESHOLD);
+                    emitError(out, m, cmdId, "Insufficient data density for retraining");
+                    return;
+                }
+                
+                // 2. Train In-Memory
+                byte[] modelBytes = ui.WayebAdapter.trainInMemory(
+                    events, 
+                    extractedPatternPath, 
+                    extractedDeclarationsPath, 
+                    pMin, gamma, 
+                    0.001, 1.05
+                );
+                
+                // 3. Write to File
+                Files.write(Paths.get(modelPath), modelBytes);
                 
                 var report = m.createObjectNode();
                 report.put("reply_id", cmdId);
@@ -237,14 +297,18 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
             // OPT_INITIALISE: Start optimization session
             // =====================================================================
             else if ("opt_initialise".equalsIgnoreCase(cmdType)) {
-                System.out.println("[Factory] OPT_INITIALISE: Locking dataset for optimization...");
+                if (datasetPath == null) {
+                    emitError(out, m, cmdId, "No dataset available to lock");
+                    return;
+                }
+                LOG.info("OPT_INITIALISE: Locking dataset for optimization...");
                 
                 // Lock the current dataset (won't be deleted during optimization)
                 datasetInUseState.update(datasetPath);
                 optimisationModelStartIdState.update(lastModelId);
                 optModelParams.clear();
                 
-                System.out.println("[Factory] Dataset locked: " + datasetPath);
+                LOG.info("Dataset locked: {}", datasetPath);
             }
             
             // =====================================================================
@@ -273,14 +337,39 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
                 
                 String modelPath = "/opt/flink/data/saved_models/wayeb_model_" + lastModelId + ".spst";
                 
-                System.out.println("[Factory] OPT_STEP " + optModelParams.size() + ": pMin=" + pMin + ", gamma=" + gamma);
+                LOG.info("OPT_STEP {}: In-Memory VMM Training pMin={}, gamma={}", optModelParams.size(), pMin, gamma);
                 
-                // Train
-                WayebBridge.train(lockedDataset, modelPath, extractedPatternPath, pMin, gamma, 0.001, 1.05);
+                // 1. Load Data
+                List<stream.GenericEvent> events = loadEvents(lockedDataset);
+
+                // Minimum Data Guard (Phase 2)
+                if (events.size() < MIN_DATA_THRESHOLD) {
+                    LOG.warn("OPT_STEP SKIPPED: Insufficient data density ({} < {}).", events.size(), MIN_DATA_THRESHOLD);
+                    emitError(out, m, cmdId, "Insufficient data density for optimization step");
+                    return;
+                }
+
+                // 2. Train In-Memory
+                byte[] modelBytes = ui.WayebAdapter.trainInMemory(
+                    events, extractedPatternPath, extractedDeclarationsPath, pMin, gamma, 0.001, 1.05
+                );
                 
-                // Test (simplified: use MCC from cross-validation or fixed metric for now)
-                // In real impl, would run WayebBridge.test() but we simulate metrics
-                double mcc = 0.5 + Math.random() * 0.4; // Simulated MCC [0.5, 0.9]
+                // 3. Write to File
+                Files.write(Paths.get(modelPath), modelBytes);
+                
+                // Test: Call in-memory test method (WayebEngine Exact Replica) to get actual MCC
+                // ALIGNMENT: Pass Job configuration to the test method
+                double mcc = ui.WayebAdapter.testInMemory(
+                    events, 
+                    modelPath, 
+                    pMin, 
+                    gamma, 
+                    0.001, 
+                    1.05, 
+                    horizon, 
+                    runConfidenceThreshold, 
+                    maxSpread
+                );
                 double f_val = -mcc; // Minimize negative MCC = maximize MCC
                 
                 var metrics = m.createObjectNode();
@@ -321,9 +410,18 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
                 
                 String modelPath = "/opt/flink/data/saved_models/wayeb_model_" + lastModelId + ".spst";
                 
-                System.out.println("[Factory] OPT_FINALISE: Re-training with best params (i=" + bestI + "): pMin=" + pMin + ", gamma=" + gamma);
+                LOG.info("OPT_FINALISE: In-Memory Re-training with best params (i={}): pMin={}, gamma={}", bestI, pMin, gamma);
                 
-                WayebBridge.train(lockedDataset, modelPath, extractedPatternPath, pMin, gamma, 0.001, 1.05);
+                // 1. Load Data
+                List<stream.GenericEvent> events = loadEvents(lockedDataset);
+
+                // 2. Train In-Memory
+                byte[] modelBytes = ui.WayebAdapter.trainInMemory(
+                    events, extractedPatternPath, extractedDeclarationsPath, pMin, gamma, 0.001, 1.05
+                );
+                
+                // 3. Write to File
+                Files.write(Paths.get(modelPath), modelBytes);
                 
                 var report = m.createObjectNode();
                 report.put("reply_id", cmdId);
@@ -336,16 +434,45 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
                 out.collect(report.toString());
                 
                 // Release resources
+                // Clean up locked dataset if it is no longer the current assembled dataset (stale)
+                String currentDataset = currentAssembledDatasetState.value();
+                if (lockedDataset != null && !lockedDataset.equals(currentDataset)) {
+                     try {
+                        Files.deleteIfExists(Paths.get(lockedDataset));
+                        LOG.info("Deleted stale locked dataset after optimization: {}", lockedDataset);
+                    } catch (IOException e) {
+                        LOG.warn("Failed to delete stale locked dataset: {}", e.getMessage());
+                    }
+                }
+
+                // Release resources
                 datasetInUseState.clear();
+                
+                // CLEANUP: Delete intermediate models generated during this optimization session
+                Integer startId = optimisationModelStartIdState.value();
+                if (startId != null) {
+                    LOG.info("Cleaning up intermediate models from ID {} to {}", startId, lastModelId - 1);
+                    for (int id = startId; id < lastModelId; id++) {
+                        String tempModelPath = "/opt/flink/data/saved_models/wayeb_model_" + id + ".spst";
+                        try {
+                            if (Files.deleteIfExists(Paths.get(tempModelPath))) {
+                                LOG.debug("Deleted intermediate model: {}", tempModelPath);
+                            }
+                        } catch (IOException e) {
+                            LOG.warn("Failed to delete intermediate model {}: {}", tempModelPath, e.getMessage());
+                        }
+                    }
+                }
+                
                 optimisationModelStartIdState.clear();
                 optModelParams.clear();
                 lastModelIdState.update(lastModelId + 1);
                 
-                System.out.println("[Factory] Optimization ended. Final model_id=" + lastModelId);
+                LOG.info("Optimization ended. Final model_id={}", lastModelId);
             }
             
             else {
-                System.out.println("[Factory] Unknown command type: " + cmdType);
+                LOG.warn("Unknown command type: {}", cmdType);
             }
             
         } catch (Exception e) {
@@ -383,7 +510,7 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
             long version = rootNode.path("version").asLong();
             
             if (pathPrefix == null || pathPrefix.isEmpty() || rangeNode == null || rangeNode.size() == 0) {
-                System.out.println("[ModelFactoryEngine] ERROR: Invalid dataset notification format");
+                LOG.error("Invalid dataset notification format");
                 return;
             }
             
@@ -397,22 +524,97 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
             
             // 2. Clean up the old assembled dataset file
             String oldAssembledPath = currentAssembledDatasetState.value();
+            String lockedPath = datasetInUseState.value();
+            
             if (oldAssembledPath != null && !oldAssembledPath.equals(newAssembledPath)) {
-                try {
-                    Files.deleteIfExists(Paths.get(oldAssembledPath));
-                    System.out.println("[ModelFactoryEngine] Deleted old assembled dataset: " + oldAssembledPath);
-                } catch (IOException e) {
-                    System.err.println("[ModelFactoryEngine] Failed to delete old dataset: " + oldAssembledPath + " - " + e.getMessage());
+                // Check if this dataset is currently locked for optimization
+                if (lockedPath != null && lockedPath.equals(oldAssembledPath)) {
+                     LOG.info("Skipping deletion of locked dataset: {}", oldAssembledPath);
+                } else {
+                    try {
+                        Files.deleteIfExists(Paths.get(oldAssembledPath));
+                        LOG.debug("Deleted old assembled dataset: {}", oldAssembledPath);
+                    } catch (IOException e) {
+                        System.err.println("[ModelFactoryEngine] Failed to delete old dataset: " + oldAssembledPath + " - " + e.getMessage());
+                    }
                 }
             }
             
             // 3. Update state with the new path
             currentAssembledDatasetState.update(newAssembledPath);
             
-            System.out.println("[ModelFactoryEngine] Dataset updated to version " + version);
+            // LOG.info("Dataset updated to version {}", version);
+
+            // 4. Emit Assembly Report (ACK) for Collector
+            // Structure matches Python's expected "assembly_reports"
+            ObjectNode ack = m.createObjectNode();
+            ack.put("version", version);
+            ack.set("buckets_range", rangeNode); // Pass through the range
+            // ack.put("path", newAssembledPath); // Optional
+            
+            // We use the MAIN output collector but with a specific wrapper or side output?
+            // Python Factory emits to a different topic.
+            // ModelFactoryJob connects main output to 'factory_reports'.
+            // We need to differentiate.
+            // Solution: Emit a JSON with "type": "assembly_report" to the main output,
+            // AND the Job will route it? Or simple emit purely for Flink internal loop?
+            // The User requested alignment with Python. Python emits to 'assembleddatasets'.
+            // Let's assume ModelFactoryJob will have a side output sink or we mix it in main topic.
+            // Mixing in main topic 'factory_reports' might confuse Controller unless filtered.
+            // Best approach: Use a SideOutput defined in ModelFactoryEngine.
+            
+            ctx.output(assemblyTag, ack.toString());
             
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    /**
+     * Reads a dataset file (line-by-line CSV) into a list of GenericEvent objects.
+     * Expects CSV from Collector: timestamp,mmsi,lon,lat,speed,heading,cog,annotation
+     */
+    private List<stream.GenericEvent> loadEvents(String datasetPath) throws IOException {
+        List<stream.GenericEvent> events = new ArrayList<>();
+        
+        List<String> lines = Files.readAllLines(Paths.get(datasetPath));
+        for (String line : lines) {
+            if (line.trim().isEmpty()) continue;
+            
+            String[] tokens = line.split(",");
+            if (tokens.length < 8) {
+                // LOG.warn("Skipping malformed CSV line: {}", line);
+                continue;
+            }
+            
+            try {
+                long ts = Long.parseLong(tokens[0]);
+                String mmsi = tokens[1];
+                String lon = tokens[2];
+                String lat = tokens[3];
+                String speed = tokens[4];
+                String heading = tokens[5];
+                String cog = tokens[6];
+                String annotation = tokens[7];
+                
+                String type = "AIS"; // Default type
+
+                // Construct attributes map
+                java.util.Map<String, Object> attributes = new java.util.HashMap<>();
+                attributes.put("mmsi", mmsi);
+                attributes.put("lon", Double.parseDouble(lon));
+                attributes.put("lat", Double.parseDouble(lat));
+                attributes.put("speed", Double.parseDouble(speed));
+                attributes.put("heading", Double.parseDouble(heading));
+                attributes.put("cog", Double.parseDouble(cog));
+                attributes.put("annotation", annotation);
+
+                // Use Bridge to create Scala Case Class
+                events.add(ui.WayebAdapter.createEvent(ts, type, attributes));
+            } catch (NumberFormatException e) {
+                // LOG.warn("Skipping line with number format error: {}", line);
+            }
+        }
+        return events;
     }
 }

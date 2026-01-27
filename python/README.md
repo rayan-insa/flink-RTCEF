@@ -1,32 +1,43 @@
 # PyFlink Controller Job
 
-The Controller Job orchestrates model optimization and re-training by synchronizing two Kafka streams:
-
-1. **Instructions** from the Observer (metrics/commands)
-2. **Datasets** from the Collector (training data)
+The Controller Job is the **brain** of the RTCEF system. It orchestrates model optimization and re-training using a Flink-native state machine architecture.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐
-│  Observer   │────▶│ Instructions │ (Kafka)
-└─────────────┘     └──────┬───────┘
-                           │
-                           ▼
-                    ┌──────────────────┐
-                    │ CoProcess        │
-                    │ Function         │◀────┐
-                    └────────┬─────────┘     │
-                             │               │
-                             ▼               │
-                    ┌──────────────────┐     │
-                    │ Model Updates    │     │
-                    └──────────────────┘     │
-                                             │
-┌─────────────┐     ┌──────────────┐        │
-│  Collector  │────▶│   Datasets   │────────┘
-└─────────────┘     └──────────────┘ (Kafka)
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           KAFKA TOPICS                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌───────────┐         ┌───────────────────┐         ┌───────────────┐ │
+│  │instructions│────────▶│ Controller        │────────▶│factory_commands│
+│  └───────────┘         │ CoProcessFunction │         └───────────────┘ │
+│        ▲               │ (ValueState)      │               │           │
+│        │               └─────────┬─────────┘               ▼           │
+│        │                         │                  ┌───────────────┐  │
+│  ┌─────┴─────┐                   │                  │ ModelFactory  │  │
+│  │ Observer  │                   │                  │ (Java)        │  │
+│  │ (Java)    │                   ▼                  └───────┬───────┘  │
+│  └───────────┘           ┌───────────────┐                  │          │
+│                          │  enginesync   │                  ▼          │
+│                          └───────┬───────┘          ┌───────────────┐  │
+│                                  │                  │factory_reports│  │
+│                                  ▼                  └───────┬───────┘  │
+│                          ┌───────────────┐                  │          │
+│                          │ WayebEngine   │◀─────────────────┘          │
+│                          │ (Java)        │                             │
+│                          └───────────────┘                             │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Kafka Topics
+
+| Topic | Producer | Consumer | Description |
+|-------|----------|----------|-------------|
+| `instructions` | Java Observer | Python Controller | OPTIMIZE/RETRAIN commands |
+| `factory_commands` | Python Controller | Java ModelFactory | train/opt_initialise/opt_step/opt_finalise |
+| `factory_reports` | Java ModelFactory | Python Controller + WayebEngine | Model training results |
+| `enginesync` | Python Controller | Java WayebEngine | pause/play commands |
 
 ## Project Structure
 
@@ -34,126 +45,115 @@ The Controller Job orchestrates model optimization and re-training by synchroniz
 python/
 ├── controller_job/
 │   ├── __init__.py
-│   ├── main.py                    # Main job entry point
+│   ├── main.py                      # PyFlink job entry point
+│   ├── optimizer.py                 # Bayesian optimizer (stateless API)
+│   ├── sync.py                      # pause/play command helpers
 │   ├── functions/
-│   │   └── controller_coprocess.py  # CoProcessFunction implementation
+│   │   ├── __init__.py
+│   │   └── controller_coprocess.py  # State machine implementation
 │   └── models/
-│       ├── instruction.py         # Instruction data model
-│       └── dataset.py            # Dataset data model
+│       ├── __init__.py
+│       └── instruction.py           # Instruction dataclass
 ├── mocks/
-│   ├── mock_instruction_producer.py  # Test producer for instructions
-│   └── mock_dataset_producer.py     # Test producer for datasets
+│   └── mock_instruction_producer.py # Test producer
 ├── requirements.txt
-└── docker-compose.kafka.yml      # Kafka infrastructure
+└── Dockerfile
 ```
+
+## Key Components
+
+### 1. `main.py` - PyFlink Job Entry Point
+
+Sets up the Flink DataStream graph:
+
+- Creates Kafka sources for `instructions` and `factory_reports`
+- Connects streams to `ControllerCoProcessFunction`
+- Configures side output sinks for `factory_commands` and `enginesync`
+
+### 2. `optimizer.py` - Bayesian Optimizer
+
+Implements hyperparameter optimization using scikit-optimize (skopt).
+
+**Two modes:**
+
+- **Synchronous**: `run_optimization()` for blocking scripts
+- **Event-Driven**: Step-by-step API for Flink state machine:
+  - `init_session()` - Start new optimization
+  - `ask()` - Get next params (pMin, gamma)
+  - `tell(f_val)` - Update Bayesian model with result
+  - `finalize()` - Select best model
+  - `get_state_snapshot()` / `load_state_snapshot()` - Serialize/restore state
+
+### 3. `controller_coprocess.py` - State Machine
+
+A `KeyedCoProcessFunction` that manages optimization sessions:
+
+**States:**
+
+- `IDLE` → `INITIALIZING` → `WAITING_FOR_REPORT` → `OPTIMIZING` → `FINALIZING` → `IDLE`
+
+**State Persistence:**
+
+- Uses Flink `ValueState` to store `OptimizationSession`
+- Optimizer's Bayesian model is pickled and base64-encoded
+
+### 4. `sync.py` - Engine Synchronization
+
+Helper functions to create pause/play commands for WayebEngine:
+
+- `create_pause_command(timestamp)` - Pause inference during optimization
+- `create_play_command(timestamp, model_id)` - Resume with new model
+
+### 5. `instruction.py` - Data Model
+
+Dataclass representing commands from Observer:
+
+- `OPTIMIZE` - Run full hyperparameter optimization
+- `RETRAIN` - Simple re-training with fixed params
 
 ## Setup
 
-### 1. Install Dependencies
+### Dependencies
 
 ```bash
-cd python
 pip install -r requirements.txt
 ```
 
-### 2. Start Kafka
+Key packages:
+
+- `apache-flink==1.17.2` - Flink Python API
+- `scikit-optimize>=0.9.0` - Bayesian optimization
+- `confluent-kafka>=2.3.0` - Kafka client for mocks
+
+### Running
+
+With Flink cluster:
 
 ```bash
-docker-compose -f docker-compose.kafka.yml up -d
+flink run -py controller_job/main.py
 ```
 
-Verify Kafka is running:
+Or via Docker:
 
 ```bash
-docker ps | grep kafka
+make start
+make submit
 ```
 
-### 3. Test with Mock Data
+## Testing
 
-In separate terminals:
-
-**Terminal 1: Send mock datasets**
-
-```bash
-python -m mocks.mock_dataset_producer
-```
-
-**Terminal 2: Send mock instructions**
+Send a mock instruction:
 
 ```bash
 python -m mocks.mock_instruction_producer
 ```
 
-**Terminal 3: Run the Controller Job**
+## Configuration
 
-```bash
-python -m controller_job.main
-```
+Environment variables:
 
-## How It Works
-
-### CoProcessFunction
-
-The `ControllerCoProcessFunction` synchronizes two streams:
-
-- **Stream 1 (processElement1)**: Datasets arrive and are buffered in Flink State
-- **Stream 2 (processElement2)**: Instructions arrive, trigger processing with buffered datasets
-
-### State Management
-
-- `dataset_buffer_state`: Accumulates datasets until an instruction arrives
-- `last_instruction_state`: Stores the last instruction for reference
-
-### Processing Flow
-
-1. Datasets continuously arrive and are stored in the buffer
-2. When an Instruction arrives:
-   - Retrieve all buffered datasets
-   - Call optimization/re-training logic (placeholder for now)
-   - Emit updated model to Kafka
-   - Clear dataset buffer
-
-## Next Steps
-
-### Integration with RTCEF Logic
-
-The current implementation has placeholder methods:
-
-- `_run_optimization()`
-- `_run_retraining()`
-
-These will be replaced with calls to the original RTCEF Python services:
-
-- `ModelFactory`: Creates candidate models
-- `Controller`: Evaluates models in a loop until convergence
-
-### Topics to Configure
-
-Current Kafka topics:
-
-- `instructions`: Instructions from Observer
-- `datasets`: Training datasets from Collector  
-- `model-updates`: Model updates to Wayeb Engine
-
-## Development Notes
-
-- Currently uses single parallelism for simplicity
-- State is keyed by `model_id` for proper partitioning
-- Models are currently serialized as strings (placeholder)
-- No watermarks/event time processing yet (can be added later)
-
-## Testing
-
-Run unit tests (TODO):
-
-```bash
-pytest tests/
-```
-
-## Deployment
-
-For production deployment to Flink cluster:
-
-```bash
-flink run -py controller_job/main.py
-```
+- `KAFKA_BOOTSTRAP_SERVERS` (default: `kafka:29092`)
+- `INSTRUCTION_TOPIC` (default: `instructions`)
+- `REPORT_TOPIC` (default: `factory_reports`)
+- `COMMAND_TOPIC` (default: `factory_commands`)
+- `SYNC_TOPIC` (default: `enginesync`)

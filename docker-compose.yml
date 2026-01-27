@@ -16,6 +16,8 @@ services:
         env.log.dir: /opt/flink/log
     volumes:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
+      - ./lib/flink-connector-kafka-1.17.2.jar:/opt/flink/lib/flink-connector-kafka-1.17.2.jar
+      - ./lib/kafka-clients-3.2.3.jar:/opt/flink/lib/kafka-clients-3.2.3.jar
       - ./data:/opt/flink/data  # Mounting data folder to /opt/flink/data container-side
       - ./python:/opt/flink/python_code # Mount python code
 
@@ -34,10 +36,12 @@ services:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 2
+        taskmanager.numberOfTaskSlots: 4
         env.log.dir: /opt/flink/log
     volumes:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
+      - ./lib/flink-connector-kafka-1.17.2.jar:/opt/flink/lib/flink-connector-kafka-1.17.2.jar
+      - ./lib/kafka-clients-3.2.3.jar:/opt/flink/lib/kafka-clients-3.2.3.jar
       - ./data:/opt/flink/data  # Mounting data folder here is critical
       - ./python:/opt/flink/python_code
 
@@ -65,3 +69,7 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE: LogAppendTime
+      KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: 1
+      KAFKA_LOG_CLEANER_THREADS: 1
+      KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G"

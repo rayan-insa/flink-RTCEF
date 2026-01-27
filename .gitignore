@@ -263,5 +263,8 @@ log/.work/
 
 # Data
 data/saved_models/
-data/saved_datasets/
-data/assembled_datasets/
+data/buckets/
+data/datasets/
+
+data/infer.csv
+data/train.csv

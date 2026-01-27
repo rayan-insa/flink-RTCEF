@@ -1,10 +1,9 @@
 """
-PyFlink Controller Job - Synchronous Optimization Mode
+PyFlink Controller Job - Flink-Native State Machine Mode.
 
-This controller implements the baseline-compatible synchronous optimization protocol:
-1. Consumes instructions from Observer (Kafka: topic 'instructions')
-2. Runs blocking optimization loops with Factory
-3. Sends sync commands to Engine (pause/play)
+This module implements the synchronous optimization protocol as an event-driven
+Flink job. It manages the lifecycle of optimization sessions by connecting
+observer instructions and factory reports through a stateful co-process function.
 
 Topics:
 - Input: 'instructions' (from Observer)
@@ -15,16 +14,26 @@ Topics:
 
 import json
 import logging
+import os
 import sys
-import time
-from typing import Optional, Dict
-from threading import Thread, Event
-from queue import Queue, Empty
 
-from confluent_kafka import Consumer, Producer, KafkaError
+from pyflink.datastream import StreamExecutionEnvironment
+from pyflink.datastream.connectors.kafka import (
+    KafkaSource,
+    KafkaRecordSerializationSchema,
+    KafkaSink,
+    DeliveryGuarantee
+)
+from pyflink.datastream.formats.json import JsonRowDeserializationSchema
+from pyflink.common import WatermarkStrategy, Types
+from pyflink.common.serialization import SimpleStringSchema
 
-from controller_job.models.instruction import Instruction, InstructionType
-from controller_job.optimizer import HyperparameterOptimizer
+from controller_job.models.instruction import Instruction
+from controller_job.functions.controller_coprocess import (
+    ControllerCoProcessFunction,
+    FACTORY_COMMAND_TAG,
+    ENGINE_SYNC_TAG
+)
 
 
 # Configure logging
@@ -36,213 +45,154 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class SyncController:
+def create_kafka_source(
+    env: StreamExecutionEnvironment,
+    bootstrap_servers: str,
+    topic: str,
+    group_id: str
+):
     """
-    Synchronous Controller that implements the baseline optimization protocol.
+    Create a Kafka source with string deserialization.
     
-    Uses blocking waits for Factory reports instead of Flink streaming.
+    Args:
+        env: The PyFlink stream execution environment.
+        bootstrap_servers: Kafka bootstrap server string.
+        topic: The Kafka topic to subscribe to.
+        group_id: Kafka consumer group ID.
+        
+    Returns:
+        DataStream: A stream of strings from Kafka.
     """
+    source = KafkaSource.builder() \
+        .set_bootstrap_servers(bootstrap_servers) \
+        .set_topics(topic) \
+        .set_group_id(group_id) \
+        .set_starting_offsets(
+            # Use earliest for instructions to not miss any
+            # Use latest for reports since we only care about new ones
+            # For simplicity, use earliest for both during development
+            __import__('pyflink.datastream.connectors.kafka', 
+                       fromlist=['KafkaOffsetsInitializer']).KafkaOffsetsInitializer.earliest()
+        ) \
+        .set_value_only_deserializer(SimpleStringSchema()) \
+        .build()
+    
+    return env.from_source(
+        source,
+        WatermarkStrategy.no_watermarks().with_idleness(
+            __import__('pyflink.common', fromlist=['Duration']).Duration.of_seconds(60)
+        ),
+        f"kafka-source-{topic}"
+    )
 
-    def __init__(
-        self,
-        bootstrap_servers: str = "kafka:29092",
-        instruction_topic: str = "instructions",
-        report_topic: str = "factory_reports",
-        command_topic: str = "factory_commands",
-        sync_topic: str = "enginesync",
-        group_id: str = "controller-sync"
-    ):
-        self.bootstrap_servers = bootstrap_servers
-        self.instruction_topic = instruction_topic
-        self.report_topic = report_topic
-        self.command_topic = command_topic
-        self.sync_topic = sync_topic
-        self.group_id = group_id
-        
-        # Kafka clients
-        self.consumer: Optional[Consumer] = None
-        self.producer: Optional[Producer] = None
-        self.report_consumer: Optional[Consumer] = None
-        
-        # Optimizer
-        self.optimizer = HyperparameterOptimizer(
-            n_initial_points=5,
-            n_total_evals=10,
-            seed=42
-        )
-        
-        # State
-        self.running = False
-        self.stop_event = Event()
 
-    def _create_consumer(self, topics: list, group_suffix: str = "") -> Consumer:
-        """Create a Kafka consumer for the given topics."""
-        config = {
-            'bootstrap.servers': self.bootstrap_servers,
-            'group.id': f"{self.group_id}{group_suffix}",
-            'auto.offset.reset': 'latest',
-            'enable.auto.commit': True
-        }
-        consumer = Consumer(config)
-        consumer.subscribe(topics)
-        logger.info(f"Created consumer for topics: {topics}")
-        return consumer
+def create_kafka_sink(
+    bootstrap_servers: str,
+    topic: str
+):
+    """
+    Create a Kafka sink with string serialization.
+    
+    Args:
+        bootstrap_servers: Kafka bootstrap server string.
+        topic: The destination Kafka topic.
+        
+    Returns:
+        KafkaSink: A configured Kafka sink.
+    """
+    return KafkaSink.builder() \
+        .set_bootstrap_servers(bootstrap_servers) \
+        .set_record_serializer(
+            KafkaRecordSerializationSchema.builder()
+            .set_topic(topic)
+            .set_value_serialization_schema(SimpleStringSchema())
+            .build()
+        ) \
+        .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE) \
+        .build()
 
-    def _create_producer(self) -> Producer:
-        """Create a Kafka producer."""
-        config = {
-            'bootstrap.servers': self.bootstrap_servers,
-            'acks': 'all'
-        }
-        producer = Producer(config)
-        logger.info("Created Kafka producer")
-        return producer
 
-    def _send_command(self, command: Dict):
-        """Send a command to the Factory via Kafka."""
-        msg = json.dumps(command)
-        self.producer.produce(self.command_topic, value=msg.encode('utf-8'))
-        self.producer.flush()
-        logger.info(f"Sent command to {self.command_topic}: type={command.get('type')}, id={command.get('id')}")
-
-    def _send_sync(self, sync_msg: str):
-        """Send a sync command to the Engine via Kafka."""
-        self.producer.produce(self.sync_topic, value=sync_msg.encode('utf-8'))
-        self.producer.flush()
-        logger.info(f"Sent sync command to {self.sync_topic}")
-
-    def _wait_for_report(self, timeout: float = 300.0) -> Dict:
-        """
-        Block until a Factory report arrives.
+def parse_instruction(json_str: str) -> Instruction:
+    """
+    Parse instruction JSON to Instruction object.
+    
+    Args:
+        json_str: The raw JSON string from Kafka.
         
-        Args:
-            timeout: Maximum time to wait in seconds
-            
-        Returns:
-            Parsed report dictionary
-        """
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            if self.stop_event.is_set():
-                raise InterruptedError("Controller stopped while waiting for report")
-            
-            msg = self.report_consumer.poll(timeout=1.0)
-            
-            if msg is None:
-                continue
-            
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
-                    continue
-                logger.error(f"Kafka error: {msg.error()}")
-                continue
-            
-            try:
-                report = json.loads(msg.value().decode('utf-8'))
-                logger.info(f"Received Factory report: reply_id={report.get('reply_id')}")
-                return report
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse report: {e}")
-                continue
-        
-        raise TimeoutError(f"Timed out waiting for Factory report after {timeout}s")
-
-    def _process_instruction(self, instruction: Instruction):
-        """Process a single instruction from the Observer."""
-        logger.info(f"Processing instruction: {instruction.instruction_type.value} for {instruction.model_id}")
-        
-        timestamp = instruction.timestamp
-        
-        if instruction.instruction_type == InstructionType.OPTIMIZE:
-            # Run full synchronous optimization loop
-            model_id = self.optimizer.run_optimization(
-                timestamp=timestamp,
-                send_command=self._send_command,
-                wait_for_report=self._wait_for_report,
-                send_sync=self._send_sync
-            )
-            logger.info(f"Optimization complete: deployed model_id={model_id}")
-            
-        elif instruction.instruction_type == InstructionType.RETRAIN:
-            # Run simple train
-            params = instruction.parameters if instruction.parameters else None
-            model_id = self.optimizer.run_train(
-                timestamp=timestamp,
-                params=params,
-                send_command=self._send_command,
-                wait_for_report=self._wait_for_report,
-                send_sync=self._send_sync
-            )
-            logger.info(f"Retrain complete: deployed model_id={model_id}")
-            
-        elif instruction.instruction_type == InstructionType.UPDATE_PARAMS:
-            # Just update local state
-            self.optimizer.current_best_params.update(instruction.parameters)
-            logger.info(f"Updated best params: {self.optimizer.current_best_params}")
-
-    def run(self):
-        """Main run loop - consume instructions and process them."""
-        logger.info("=== Starting Synchronous Controller ===")
-        
-        # Initialize Kafka clients
-        self.consumer = self._create_consumer([self.instruction_topic])
-        self.report_consumer = self._create_consumer([self.report_topic], group_suffix="-reports")
-        self.producer = self._create_producer()
-        
-        self.running = True
-        logger.info(f"Listening on topic: {self.instruction_topic}")
-        
-        try:
-            while not self.stop_event.is_set():
-                msg = self.consumer.poll(timeout=1.0)
-                
-                if msg is None:
-                    continue
-                
-                if msg.error():
-                    if msg.error().code() == KafkaError._PARTITION_EOF:
-                        continue
-                    logger.error(f"Kafka error: {msg.error()}")
-                    continue
-                
-                try:
-                    instruction = Instruction.from_json(msg.value().decode('utf-8'))
-                    self._process_instruction(instruction)
-                except Exception as e:
-                    logger.error(f"Error processing instruction: {e}", exc_info=True)
-                    
-        except KeyboardInterrupt:
-            logger.info("Received shutdown signal")
-        finally:
-            self.stop()
-
-    def stop(self):
-        """Stop the controller gracefully."""
-        logger.info("Stopping controller...")
-        self.stop_event.set()
-        self.running = False
-        
-        if self.consumer:
-            self.consumer.close()
-        if self.report_consumer:
-            self.report_consumer.close()
-        if self.producer:
-            self.producer.flush()
-        
-        logger.info("Controller stopped")
+    Returns:
+        Instruction: The parsed instruction model.
+    """
+    return Instruction.from_json(json_str)
 
 
 def main():
-    """Main entry point."""
-    controller = SyncController(
-        bootstrap_servers="kafka:29092",
-        instruction_topic="instructions",
-        report_topic="factory_reports",
-        command_topic="factory_commands",
-        sync_topic="enginesync"
+    """Main entry point for the Flink Controller Job."""
+    # Configuration from environment
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
+    instruction_topic = os.getenv("INSTRUCTION_TOPIC", "instructions")
+    report_topic = os.getenv("REPORT_TOPIC", "factory_reports")
+    command_topic = os.getenv("COMMAND_TOPIC", "factory_commands")
+    sync_topic = os.getenv("SYNC_TOPIC", "enginesync")
+    
+    logger.info("=== Starting Flink Controller Job (State Machine Mode) ===")
+    logger.info(f"Kafka: {bootstrap_servers}")
+    logger.info(f"Input topics: {instruction_topic}, {report_topic}")
+    logger.info(f"Output topics: {command_topic}, {sync_topic}")
+    
+    # Create execution environment
+    env = StreamExecutionEnvironment.get_execution_environment()
+    env.set_parallelism(1)  # Single partition for global ordering
+    
+    # Enable checkpointing for fault tolerance
+    env.enable_checkpointing(10000)  # 10 second checkpoint interval
+    
+    # Create Kafka sources
+    instruction_stream = create_kafka_source(
+        env, bootstrap_servers, instruction_topic, "controller-instructions"
     )
-    controller.run()
+    
+    report_stream = create_kafka_source(
+        env, bootstrap_servers, report_topic, "controller-reports"
+    )
+    
+    # Parse instructions
+    parsed_instructions = instruction_stream \
+        .map(parse_instruction, output_type=Types.PICKLED_BYTE_ARRAY()) \
+        .name("parse-instructions")
+    
+    # Key both streams by a constant key (single optimizer instance)
+    # In a multi-tenant setup, you would key by model_id or tenant_id
+    keyed_instructions = parsed_instructions \
+        .key_by(lambda instr: "GLOBAL", key_type=Types.STRING())
+    
+    keyed_reports = report_stream \
+        .key_by(lambda report: "GLOBAL", key_type=Types.STRING())
+    
+    # Connect and process with state machine
+    controller = ControllerCoProcessFunction()
+    
+    processed = keyed_instructions \
+        .connect(keyed_reports) \
+        .process(controller) \
+        .name("controller-state-machine")
+    
+    # Get side outputs
+    factory_commands = processed.get_side_output(FACTORY_COMMAND_TAG)
+    engine_sync = processed.get_side_output(ENGINE_SYNC_TAG)
+    
+    # Create Kafka sinks
+    command_sink = create_kafka_sink(bootstrap_servers, command_topic)
+    sync_sink = create_kafka_sink(bootstrap_servers, sync_topic)
+    
+    # Connect to sinks
+    factory_commands.sink_to(command_sink).name("sink-factory-commands")
+    engine_sync.sink_to(sync_sink).name("sink-engine-sync")
+    
+    # Main output (optimization completion events) - log for now
+    processed.print().name("log-completion-events")
+    
+    logger.info("Job graph constructed, executing...")
+    env.execute("Controller Job - State Machine")
 
 
 if __name__ == "__main__":
