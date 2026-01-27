@@ -269,6 +269,8 @@ data/maritime-eval.jsonl
 
 data/infer.csv
 data/train.csv
+data/infer.jsonl
+data/train.jsonl
 
 
 .DS_Store

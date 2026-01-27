@@ -33,20 +33,35 @@ def main():
         print("Error: Empty file.")
         exit(1)
         
-    # Check for header (heuristic: starts with non-digit)
-    has_header = False
-    if lines[0] and not lines[0][0].isdigit():
-        header = lines[0]
-        data = lines[1:]
-        has_header = True
-    else:
-        header = ""
-        data = lines
+    import json
 
-    # ALWAYS Sort by Timestamp (Column 0) before splitting for chronological order
+    # Check file extension
+    is_jsonl = args.file.endswith('.jsonl')
+    
+    # Check for header (heuristic: starts with non-digit) - Only for CSV
+    has_header = False
+    header = ""
+    
+    if is_jsonl:
+        print("Detected JSONL format.")
+        data = lines
+    else:
+        if lines[0] and not lines[0][0].isdigit():
+            header = lines[0]
+            data = lines[1:]
+            has_header = True
+        else:
+            data = lines
+
+    # ALWAYS Sort by Timestamp before splitting for chronological order
     print("Sorting Data by Timestamp for chronological split...")
     try:
-        data.sort(key=lambda line: int(line.split(',')[0]))
+        if is_jsonl:
+            # Parse JSON to extract timestamp
+            # We assume "timestamp" field exists as per our analysis
+            data.sort(key=lambda line: int(json.loads(line).get('timestamp', 0)))
+        else:
+            data.sort(key=lambda line: int(line.split(',')[0]))
     except Exception as e:
         print(f"Warning: Could not sort by timestamp: {e}")
 
@@ -59,22 +74,24 @@ def main():
     train_data = data[:split_idx]
     infer_data = data[split_idx:]
     
-    train_file = os.path.join(args.output_dir, 'train.csv')
-    infer_file = os.path.join(args.output_dir, 'infer.csv')
+    # Determine output filenames based on input extension
+    ext = '.jsonl' if is_jsonl else '.csv'
+    train_file = os.path.join(args.output_dir, 'train' + ext)
+    infer_file = os.path.join(args.output_dir, 'infer' + ext)
     
     print(f"Splitting data: {args.train_pct*100}% Training (Earliest), {(1-args.train_pct)*100}% Inference (Latest)")
     print(f"Total Rows: {total_rows}")
     print(f"Writing {len(train_data)} rows to {train_file}")
     
     with open(train_file, 'w') as f:
-        if has_header:
+        if has_header and not is_jsonl:
             f.write(header)
         f.writelines(train_data)
         
     print(f"Writing {len(infer_data)} rows to {infer_file}")
     
     with open(infer_file, 'w') as f:
-        if has_header:
+        if has_header and not is_jsonl:
             f.write(header)
         f.writelines(infer_data)
         

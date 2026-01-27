@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -574,43 +575,50 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
      */
     private List<stream.GenericEvent> loadEvents(String datasetPath) throws IOException {
         List<stream.GenericEvent> events = new ArrayList<>();
+        ObjectMapper m = getMapper();
         
         List<String> lines = Files.readAllLines(Paths.get(datasetPath));
         for (String line : lines) {
             if (line.trim().isEmpty()) continue;
             
-            String[] tokens = line.split(",");
-            if (tokens.length < 8) {
-                // LOG.warn("Skipping malformed CSV line: {}", line);
-                continue;
-            }
-            
             try {
-                long ts = Long.parseLong(tokens[0]);
-                String mmsi = tokens[1];
-                String lon = tokens[2];
-                String lat = tokens[3];
-                String speed = tokens[4];
-                String heading = tokens[5];
-                String cog = tokens[6];
-                String annotation = tokens[7];
+                // Parse JSONL line
+                JsonNode root = m.readTree(line);
                 
-                String type = "AIS"; // Default type
-
+                // Extract Standard Fields (Data Agnostic)
+                // We assume the stored JSONL follows the structure emitted by Collector
+                long ts = root.path("timestamp").asLong();
+                
                 // Construct attributes map
                 java.util.Map<String, Object> attributes = new java.util.HashMap<>();
-                attributes.put("mmsi", mmsi);
-                attributes.put("lon", Double.parseDouble(lon));
-                attributes.put("lat", Double.parseDouble(lat));
-                attributes.put("speed", Double.parseDouble(speed));
-                attributes.put("heading", Double.parseDouble(heading));
-                attributes.put("cog", Double.parseDouble(cog));
-                attributes.put("annotation", annotation);
+                Iterator<String> fieldNames = root.fieldNames();
+                while (fieldNames.hasNext()) {
+                    String fieldName = fieldNames.next();
+                    JsonNode node = root.get(fieldName);
+                    
+                    if (node.isNumber()) {
+                        if (node.isIntegralNumber()) {
+                            // attributes.put(fieldName, node.asLong()); 
+                            // Wayeb usually prefers Double for compatibility
+                             attributes.put(fieldName, node.asDouble());
+                        } else {
+                            attributes.put(fieldName, node.asDouble());
+                        }
+                    } else if (node.isTextual()) {
+                        attributes.put(fieldName, node.asText());
+                    } else if (node.isBoolean()) {
+                        attributes.put(fieldName, node.asBoolean());
+                    }
+                }
+                
+                String type = "AIS"; // Default type or extract from JSON if available?
+                // For now, keep "AIS" or make it generic "EVENT"
+                if (root.has("type")) type = root.get("type").asText();
 
                 // Use Bridge to create Scala Case Class
                 events.add(ui.WayebAdapter.createEvent(ts, type, attributes));
-            } catch (NumberFormatException e) {
-                // LOG.warn("Skipping line with number format error: {}", line);
+            } catch (Exception e) {
+                 // LOG.warn("Skipping malformed JSON line: {}", line);
             }
         }
         return events;

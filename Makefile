@@ -24,19 +24,41 @@ FACTORY_CLASS  := edu.insa_lyon.streams.rtcef_flink.ModelFactoryJob
 # --- Flink Configuration ---
 FLINK_JM_URL   := localhost:8081
 
+# --- Dataset Configuration ---
+# Default dataset is 'maritime'. Override with 'make run DATASET=finance'
+DATASET ?= maritime
+
+ifeq ($(DATASET),finance)
+    INPUT_PATH      := $(DATA_DIR)/finance-eval.jsonl
+    ID_FIELD        := pan
+    TIMESTAMP_FIELD := timestamp
+    DOMAIN_TYPE     := json
+else
+    # Default to maritime
+    INPUT_PATH      := $(DATA_DIR)/maritime-eval.jsonl
+    ID_FIELD        := mmsi
+    TIMESTAMP_FIELD := timestamp
+    DOMAIN_TYPE     := json
+endif
+
+# --- Kafka Topics ---
+INPUT_TOPIC := $(DATASET)_input
+
 # --- Training Configuration ---
-TRAIN_PATTERNS := $(WAYEB_DIR)/patterns/maritime/port/pattern.sre
-TRAIN_DECLS    := $(WAYEB_DIR)/patterns/maritime/port/declarationsDistance1.sre
-TRAIN_STREAM   := $(WAYEB_DIR)/data/maritime/227592820.csv
+TRAIN_PATTERNS := $(WAYEB_DIR)/patterns/$(DATASET)/fraud/pattern.sre
+TRAIN_DECLS    := $(WAYEB_DIR)/patterns/$(DATASET)/fraud/declarations.sre
+ifeq ($(DATASET),maritime)
+    TRAIN_PATTERNS := $(WAYEB_DIR)/patterns/maritime/port/pattern.sre
+    TRAIN_DECLS    := $(WAYEB_DIR)/patterns/maritime/port/declarationsDistance1.sre
+endif
 MODEL_OUTPUT   := $(DATA_DIR)/saved_models/tmp.spst
 
 # --- Flink Job Parameters ---
-# Default parameters (can be overridden from command line like: make submit THRESHOLD=0.5)
-MODEL_PATH ?= /opt/flink/data/saved_models/tmp.spst
-INPUT_PATH ?= /opt/flink/data/maritime.csv
-HORIZON ?= 600
-THRESHOLD ?= 0.3
-MAX_SPREAD ?= 5
+MODEL_PATH         ?= /opt/flink/data/saved_models/tmp.spst
+HORIZON            ?= 600
+THRESHOLD          ?= 0.3
+MAX_SPREAD         ?= 5
+REPORTING_DISTANCE := 6000
 
 # --- Collector & Dataset Configuration ---
 # Bucket Size in Seconds (86400 = 24h). 
@@ -44,7 +66,7 @@ MAX_SPREAD ?= 5
 # Original Prod: 604800 (7 days).
 BUCKET_SIZE_SEC := 86400
 # Usage History Keep (Last K Datasets).
-# Original Prod: 4. Adjusted to 2 for faster rotation testing.
+# Original Prod: 4. Adjusted to 7 for faster rotation testing.
 HISTORY_K       := 7
 NAMING_PREFIX   := dt_bucket_
 
@@ -100,14 +122,21 @@ stop:
 	rm -rf $(DATA_DIR)/saved_datasets/*
 	rm -f $(DATA_DIR)/infer.csv
 	rm -f $(DATA_DIR)/train.csv
+	rm -f $(DATA_DIR)/infer.jsonl
+	rm -f $(DATA_DIR)/train.jsonl
 
 # 3. Build Libraries & Job
 build: check-deps build-wayeb build-flink
 
 # 4. Full Cycle (The "Magic Button")
+# 4. Full Cycle (The "Magic Button")
 run: build train run-all-jobs
+# This runs the complete pipeline:
+# 1. build: Compiles Wayeb (Scala) and Flink Jobs (Java)
+# 2. train: Bootstraps the VMM model using the training slice of the JSONL dataset
+# 3. run-all-jobs: Inits Kafka, splits data, and submits all processing jobs
 
-run-all-jobs: init-kafka
+run-all-jobs: init-kafka prepare-data
 	@echo ">>> Submitting ALL jobs to Flink..."
 	@$(MAKE) submit-inference
 	@sleep 2
@@ -149,11 +178,13 @@ build-flink:
 # --- Prepare Data (Split) ---
 prepare-data:
 	@echo ">>> Splitting Dataset..."
-	@python3 python/split_dataset.py --file $(DATA_DIR)/maritime.csv --train-pct 0.20 --output-dir $(DATA_DIR)
+	@python3 python/split_dataset.py --file $(INPUT_PATH) --train-pct 0.20 --output-dir $(DATA_DIR)
 
 # --- Train Model ---
+# We bootstrap the initial model (tmp.spst) using the training slice.
+# This allows the InferenceJob to start with a non-empty knowledge base.
 train: prepare-data
-	@echo ">>> Training Model (VMM)..."
+	@echo ">>> Training Model (VMM) using $(DOMAIN_TYPE) on $(DATASET) dataset..."
 	@if [ ! -f "$(WAYEB_JAR)" ]; then echo "Error: Wayeb Jar missing. Run 'make build' first."; exit 1; fi
 	@mkdir -p $(dir $(MODEL_OUTPUT))
 	
@@ -162,8 +193,8 @@ train: prepare-data
 		--fsmModel:dsfa \
 		--patterns:$(TRAIN_PATTERNS) \
 		--declarations:$(TRAIN_DECLS) \
-		--stream:$(DATA_DIR)/train.csv \
-		--domainSpecificStream:maritime \
+		--stream:$(DATA_DIR)/train.jsonl \
+		--domainSpecificStream:$(DOMAIN_TYPE) \
 		--outputSpst:$(MODEL_OUTPUT)
 	
 	@echo "Model saved to: $(MODEL_OUTPUT)"
@@ -178,7 +209,7 @@ submit-inference:
 	JAR_ID=$$(echo $$RESPONSE | grep -o '"filename":"[^"]*"' | cut -d'"' -f4 | xargs basename); \
 	echo "   -> Uploaded Jar ID: $$JAR_ID"; \
 	echo "   -> Starting InferenceJob..."; \
-	curl -X POST "http://$(FLINK_JM_URL)/jars/$$JAR_ID/run?entry-class=$(JOB_CLASS)&program-args=--modelPath+$(MODEL_PATH)+--inputTopic+maritime_input+--instructions-topic+observer_instructions+--model-reports-topic+model_reports+--datasets-topic+dataset_versions+--assembly-topic+assembly_reports+--horizon+$(HORIZON)+--threshold+$(THRESHOLD)+--maxSpread+$(MAX_SPREAD)+--inputSource+kafka+--observer-optimize-diff+0.001+--observer-grace+0+--reportingDistance+6000+--bucketSize+$(BUCKET_SIZE_SEC)+--lastK+$(HISTORY_K)+--naming+$(NAMING_PREFIX)"
+	curl -X POST "http://$(FLINK_JM_URL)/jars/$$JAR_ID/run?entry-class=$(JOB_CLASS)&program-args=--modelPath+$(MODEL_PATH)+--inputTopic+$(INPUT_TOPIC)+--instructions-topic+observer_instructions+--model-reports-topic+model_reports+--datasets-topic+dataset_versions+--assembly-topic+assembly_reports+--horizon+$(HORIZON)+--threshold+$(THRESHOLD)+--maxSpread+$(MAX_SPREAD)+--inputSource+kafka+--observer-optimize-diff+0.001+--observer-grace+0+--reportingDistance+$(REPORTING_DISTANCE)+--bucketSize+$(BUCKET_SIZE_SEC)+--lastK+$(HISTORY_K)+--naming+$(NAMING_PREFIX)+--idField+$(ID_FIELD)+--timestampField+$(TIMESTAMP_FIELD)"
 	
 	@echo "\nInferenceJob Submitted!"
 
@@ -206,7 +237,7 @@ submit-controller:
 
 run-feeder:
 	@echo ">>> Starting Async Data Feeder..."
-	@docker compose exec -d jobmanager python3 /opt/flink/python_code/data_feeder.py --file /opt/flink/data/infer.csv --topic maritime_input --delay 0.1
+	@docker compose exec -d jobmanager python3 /opt/flink/python_code/data_feeder.py --file /opt/flink/data/infer.jsonl --topic $(INPUT_TOPIC) --delay 0.1
 	@echo "Data Feeder running in background!"
 
 # --- Initialize Kafka Topics ---
@@ -218,7 +249,7 @@ init-kafka:
 	@docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic enginesync --partitions 1 --replication-factor 1 || true
 	@docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic dataset_versions --partitions 1 --replication-factor 1 || true
 	@docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic assembly_reports --partitions 1 --replication-factor 1 || true
-	@docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic maritime_input --partitions 1 --replication-factor 1 || true
+	@docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic $(INPUT_TOPIC) --partitions 1 --replication-factor 1 || true
 	@echo ">>> Kafka Topics Ready!"
 	@docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list
 	@echo "Waiting 5s for Kafka propagation..."

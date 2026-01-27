@@ -113,10 +113,15 @@ public class InferenceJob {
         // 2. Setup Data Sources
         // =========================================================================
         
-        // A. Maritime Events (Kafka Only)
+        // A. Maritime/Generic Events (Kafka Only)
         // User requested to remove File Source support.
         DataStream<GenericEvent> mainStream;
         
+        // Generic Input Params
+        String idField = params.get("idField", "mmsi");
+        String timestampField = params.get("timestampField", "timestamp");
+        String eventType = params.get("eventType", "AIS");
+
         KafkaSource<String> maritimeSource = KafkaSource.<String>builder()
             .setBootstrapServers(kafkaServers)
             .setTopics(inputTopic)
@@ -129,7 +134,7 @@ public class InferenceJob {
             
         mainStream = env
             .fromSource(maritimeSource, WatermarkStrategy.noWatermarks(), "Maritime Kafka Source")
-            .flatMap(new MaritimeParser());
+            .flatMap(new JsonEventParser(idField, timestampField, eventType));
 
         mainStream = mainStream.assignTimestampsAndWatermarks(
             WatermarkStrategy.<GenericEvent>forBoundedOutOfOrderness(Duration.ofSeconds(60))
@@ -181,10 +186,14 @@ public class InferenceJob {
         DataStream<String> notificationStream;
         
         if (params.getInt("parallelism", 1) > 1) {
-            // Distribute by MMSI for scaling
-            // Broadcast feedback so all collector instances receive cleanup instructions
+            // Distribute by ID for scaling (Generic Agnostic)
+            // Use the configured ID field for keying
+            final String keyField = idField; 
             notificationStream = mainStream
-                .keyBy(e -> e.getValueOf("mmsi").toString())
+                .keyBy(e -> {
+                     Object val = e.getValueOf(keyField);
+                     return (val != null) ? val.toString() : e.id(); 
+                })
                 .connect(feedbackStream.broadcast()) 
                 .process(new Collector(outputPath, namingPrefix, bucketSizeSec, lastK));
         } else {
@@ -211,8 +220,12 @@ public class InferenceJob {
         // =========================================================================
         // 5. Branch C: Wayeb Engine (Detection & Forecasting with Dynamic Models)
         // =========================================================================
+        final String engineKeyField = idField;
         SingleOutputStreamOperator<ReportOutput> reportStream = mainStream
-            .keyBy(e -> e.getValueOf("mmsi").toString())
+            .keyBy(e -> {
+                 Object val = e.getValueOf(engineKeyField);
+                 return (val != null) ? val.toString() : e.id(); 
+            })
             .connect(broadcastStream) 
             .process(new WayebEngine(
                 loadPath,

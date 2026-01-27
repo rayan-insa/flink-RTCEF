@@ -196,26 +196,56 @@ public class Collector extends CoProcessFunction<GenericEvent, String, String> {
         
         Path path = Paths.get(outputPath, filename);
 
-        // Write CSV format matching MaritimeLineParser expectation:
-        // timestamp,mmsi,lon,lat,speed,heading,cog,annotation
-        Object mmsi = event.getValueOf("mmsi");
-        if (mmsi == null) mmsi = event.id(); // Fallback if mmsi missing (shouldn't happen with correct parser)
+        // Write JSONL format (Data Agnostic) using `event.attributes()` map from Wayeb
+        // We need to convert the Wayeb/Scala map OR reconstructing it from the event values.
+        // GenericEvent usually keeps attributes in a specific way.
+        // However, we don't have direct access to "all" attributes via a simple java map from GenericEvent easily 
+        // without casting/conversion if it's a Scala map. 
+        // But WayebAdapter created it, so it's a GenericEvent.
+        // Let's use the `event` object's methods or providing a way to serialize it.
 
-        Object annotation = event.getValueOf("annotation");
-        if (annotation == null) annotation = "0"; // Default label if missing
+        // Actually, for simplicity and performance in Java without dragging in full Scala JSON interaction:
+        // We successfully accessed `event.getValueOf("field")` before.
+        // But to be AGNOSTIC, we need all fields.
+        // `GenericEvent` in Wayeb (Scala) -> has `payload: Map[String, Any]`?
+        // Let's rely on constructing a Map from known attributes? NO, that's what we want to avoid.
+        
+        // BETTER APPROACH:
+        // The `JsonEventParser` put all JSON fields into the attributes map.
+        // We should try to serialize that map.
+        
+        // Strategy: Cast to specific Wayeb class if possible or iterate known keys?
+        // Since we don't know keys (Agnostic), we need to iterate the event's payload.
+        // `GenericEvent` interface in Wayeb: `def payload: Map[String, Any]`
+        
+        // Let's try to convert Scala Map to Java Map or just build an ObjectNode.
+        ObjectNode json = mapper.createObjectNode();
+        
+        // We can't easily iterate Scala map from Java without `JavaConverters`.
+        // Let's assume we can get the keys if we know them? No.
+        
+        // RE-STRATEGY: 
+        // Use `ui.WayebAdapter.eventToMap(event)` helper if it existed?
+        // Or simply add `JavaConverters` usage here.
+        // Use `getAttributes()` which we just added to GenericEvent.scala
+        java.util.Map<String, Object> attributes = scala.collection.JavaConverters.mapAsJavaMap(event.getAttributes());
+        
+        for (java.util.Map.Entry<String, Object> entry : attributes.entrySet()) {
+             String key = entry.getKey();
+             Object val = entry.getValue();
+             if (val instanceof Double) json.put(key, (Double) val);
+             else if (val instanceof Long) json.put(key, (Long) val);
+             else if (val instanceof Integer) json.put(key, (Integer) val);
+             else if (val instanceof Boolean) json.put(key, (Boolean) val);
+             else json.put(key, val.toString());
+        }
+        
+        // Ensure standard fields are present
+        json.put("timestamp", event.timestamp());
+        // json.put("id", event.id()); // "mmsi" or "symbol" is likely already in payload?
+        // If "mmsi" key is in payload it will be written.
 
-        String csv = String.format(
-            "%d,%s,%s,%s,%s,%s,%s,%s",
-            event.timestamp(),
-            mmsi,
-            event.getValueOf("lon"),
-            event.getValueOf("lat"),
-            event.getValueOf("speed"),
-            event.getValueOf("heading"),
-            event.getValueOf("cog"),
-            annotation
-        );
-        String line = csv + System.lineSeparator();
+        String line = mapper.writeValueAsString(json) + System.lineSeparator();
 
         // BLOCKING I/O
         try {
