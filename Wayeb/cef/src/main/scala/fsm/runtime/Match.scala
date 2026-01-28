@@ -14,7 +14,7 @@ object Match {
 /**
   * Class representing matches. Just a list with info from the events of a match.
   */
-class Match(val id: Int) {
+class Match(val id: Int) extends Serializable {
   // For each event, we store its id, the event counter (fsm.runtime.Run) and the automaton configuration.
   private val events = ListBuffer[(Int, Long, Configuration)]()
   private val eventsSimple = ListBuffer[(Int, Long)]()

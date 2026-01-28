@@ -94,6 +94,12 @@ class GenericEvent(
     }
   }
 
+  /**
+    * Exposes the internal map of attributes. 
+    * Essential for data-agnostic serialization (e.g. JSONL output).
+    */
+  def getAttributes: Map[String, Any] = extraArgs
+
   override def toString: String =
     id + "|" + timestamp + "|" + eventType + "|" + extraArgs.toString()
 }

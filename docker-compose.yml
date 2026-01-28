@@ -1,30 +1,75 @@
 services:
   jobmanager:
-    image: apache/flink:1.17-java11
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    image: flink-rtcef:python-env
+    platform: linux/amd64
     ports:
       - "8081:8081"
     command: jobmanager
     environment:
+      - PYTHONPATH=/opt/flink/python_code
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
         env.log.dir: /opt/flink/log
     volumes:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
+      - ./lib/flink-connector-kafka-1.17.2.jar:/opt/flink/lib/flink-connector-kafka-1.17.2.jar
+      - ./lib/kafka-clients-3.2.3.jar:/opt/flink/lib/kafka-clients-3.2.3.jar
       - ./data:/opt/flink/data  # Mounting data folder to /opt/flink/data container-side
+      - ./python:/opt/flink/python_code # Mount python code
 
   taskmanager:
-    image: apache/flink:1.17-java11
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    image: flink-rtcef:python-env
+    platform: linux/amd64
     depends_on:
       - jobmanager
     command: taskmanager
     scale: 1
     environment:
+      - PYTHONPATH=/opt/flink/python_code
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 2
+        taskmanager.numberOfTaskSlots: 4
         env.log.dir: /opt/flink/log
     volumes:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
+      - ./lib/flink-connector-kafka-1.17.2.jar:/opt/flink/lib/flink-connector-kafka-1.17.2.jar
+      - ./lib/kafka-clients-3.2.3.jar:/opt/flink/lib/kafka-clients-3.2.3.jar
       - ./data:/opt/flink/data  # Mounting data folder here is critical
+      - ./python:/opt/flink/python_code
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    platform: linux/amd64
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    platform: linux/amd64
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE: LogAppendTime
+      KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: 1
+      KAFKA_LOG_CLEANER_THREADS: 1
+      KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G"

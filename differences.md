@@ -1,0 +1,120 @@
+# RTCEF Implementation: Differences & Rationale
+
+This document outlines the architectural and implementation differences between the original Python/Scala RTCEF framework (as described in the research papers) and this high-performance Apache Flink implementation.
+
+---
+
+## 1. Model Synchronization Mechanism
+
+**Original**: "Stop-and-Go" via a synchronization topic (`pause` / `play`).
+**Flink**: Hybrid: Asynchronous "Transition Period" + Broadcast Control.
+
+* **Description**:
+  * *Model Swaps*: The `WayebEngine` continues processing using the old model until the stream reaches a specific `syncTimestamp` (calculated as `currentTime + productionTime`), at which point it swaps the model mid-stream uniquely per key.
+  * *Optimization Phase*: An explicit **Broadcast PAUSE/PLAY** mechanism is implemented to freeze inference engines during the parameter search (Optimization sessions). This prevents engines from using unselected/temporary models during the training cycle.
+* **Justification**: Combines Flink's continuous streaming strengths with the original's need for isolation during critical re-training.
+* **Pros**: Zero downtime for standard refreshes; complete consistency during multi-step optimization loops.
+* **Cons**: Short periods of halted inference during optimization.
+
+## 2. Data Collection Strategy (Collector)
+
+**Original**: "Data-Driven" Bucketing.
+**Flink**: "Wall-Clock" / Fixed-Window Bucketing.
+
+* **Description**:
+  * *Original*: A bucket starts only when the first event arrives (e.g., 10:12) and ends exactly `bucket_size` later (11:12). If there is a data gap, no empty buckets are created.
+  * *Flink*: Time is divided into fixed slices aligned with the Unix Epoch (e.g., 10:00-11:00, 11:00-12:00).
+* **Justification**: Flink’s windowing API is naturally aligned with the epoch. This provides high predictability and leverages Flink's optimized watermark-based triggering.
+* **Pros**: Predictable execution; better alignment across multiple parallel sub-tasks.
+* **Cons**: Potential for "fragmented" first buckets if data starts mid-window; may generate empty files/notifications during data silences (unless configured otherwise).
+
+## 3. Data Serialization & Transport
+
+**Original**: Avro + Confluent Schema Registry.
+**Flink**: JSON (Control) + CSV (Data).
+
+* **Description**: The original stack uses Avro for strictly typed, binary-efficient message passing. This implementation uses human-readable JSON for Kafka messages and plain CSV for datasets on disk.
+* **Justification**: Simplifies the technical stack by removing the dependency on a Schema Registry. Facilitates rapid prototyping and cross-language debugging (Java/Scala/Python).
+* **Pros**: Easy to debug; lower infrastructure overhead; immediate interoperability.
+* **Cons**: Larger message size; lack of strict schema enforcement at the transport layer.
+
+## 4. State Management & Fault Tolerance
+
+**Original**: Often managed in-memory or via external databases (e.g., Redis).
+**Flink**: Native Flink Managed State (`ValueState`, `BroadcastState`).
+
+* **Description**: Flink manages the internal state of the Wayeb engines and predictors. This state is periodically backed up to a distributed filesystem (Checkpoints).
+* **Justification**: Provides "Exactly-Once" processing guarantees and automatic recovery. If a worker fails, Flink restores the engine's state immediately without losing progress.
+* **Pros**: High reliability; seamless scalability of state across a cluster.
+* **Cons**: Complexity in serializing/deserializing complex Scala objects (Wayeb FSMs) into Flink's state backend.
+
+## 5. Dataset Assembly Pipeline
+
+**Original**: Discrete services for collecting and notifying.
+**Flink**: Integrated Pipeline (Collector + Notifier in one job).
+
+* **Description**: In Flink, the `InferenceJob` performs inference and data collection/notification simultaneously. The `ModelFactoryEngine` pre-assembles datasets (concatenating CSV files) as soon as it receives a notification.
+* **Justification**: Reduces the number of moving parts and minimizes network hops between services.
+* **Pros**: Simplified orchestration; lower latency from "data ready" to "training start".
+* **Cons**: Tight coupling between units (though mitigated by Kafka's decoupling).
+
+## 6. Special Event Handling (`ResetEvent`)
+
+**Original**: Explicit handling to reset FSM states.
+**Flink**: Currently ignored (Voluntary simplification).
+
+* **Description**: The original system uses `ResetEvent` to clear partial matches when data streams are stitched together. This implementation currently treats all events as standard data points.
+* **Description**: The original system uses `ResetEvent` to clear partial matches when data streams are stitched together. This implementation currently treats all events as standard data points.
+* **Justification**: Focus is placed on steady-state performance. For the current maritime use case, state "pollution" from disconnected segments is considered a secondary concern compared to implementation complexity.
+* **Pros**: Leaner engine code.
+* **Cons**: Potential for incorrect predictions if a ship's context changes significantly after a long data gap without a state reset.
+
+---
+
+## 7. Parallelism & Scalability (Major Architecture Divergence)
+
+**Original**: Single Global Engine Instance (Sequential).
+**Flink**: Distributed Keyed-Parallelism (Sharded by MMSI).
+
+* **Description**:
+  * *Original*: A single `OOFERFEngine` consumes the entire stream. It calculates global model metrics (TP/TN/FP/FN) by aggregating all events from all vessels sequentially.
+  * *Flink*: The stream is partitioned (`keyBy(mmsi)`). Multiple `WayebEngine` instances run in parallel on different cluster nodes, each handling a subset of vessels. Each engine calculates metrics *only* for its assigned vessels.
+* **Justification**: The original sequential approach is a scalability bottleneck. Flink's keyed approach allows the system to scale horizontally to millions of vessels by simply adding more worker nodes.
+* **Implication**: The "Score" emitted by `WayebEngine` in Flink is local to a ship. To match the original Observer's logic (which decides based on global health), an explicit aggregation step (Map-Reduce) is required before the Observer.
+* **Pros**: Infinite horizontal scalability; robust fault isolation (one ship crashing doesn't kill the pipeline).
+* **Cons**: Requires an extra aggregation window to reconstruct the global view.
+
+## 8. Out-of-Order Handling (Watermarks)
+
+**Original**: Implicit or manual handling of event ordering.
+**Flink**: Native Watermark-based Event Time.
+
+* **Description**: Flink uses Watermarks to handle late-arriving positions. This ensures that windows (for the Collector) and model swaps (for the Engine) occur based on the "logical" time of the data, not when the data arrives at the server.
+* **Pros**: Robustness against network delays or out-of-order Kafka partitions.
+* **Cons**: Correct Watermark generation is critical; a bad strategy can stall the entire pipeline.
+
+## 9. Data Quality Guards (Minimum Thresholds)
+
+**Original**: Variable or implicit data requirements.
+**Flink**: Explicit `MIN_DATA_THRESHOLD` enforcement.
+
+* **Description**: The `ModelFactoryEngine` verifies that the assembled dataset contains at least 1000 events before proceeding with training or optimization. If events < 1000, the session is skipped/aborted.
+* **Pros**: Prevents "noisy" model generation; stabilizes re-training in sparse data scenarios (e.g., ships at port).
+
+## 10. Model Lifecycle Management (Cleanup)
+
+**Original**: Manual cleanup of historical models.
+**Flink**: Automatic session-based cleanup.
+
+* **Description**: Post-optimization, the `ModelFactoryEngine` automatically identifies and deletes all intermediate candidate models (`.spst`) from the current session, retaining only the final "best" model.
+* **Pros**: Minimizes storage foot-print in production; keeps the `saved_models/` directory focused.
+
+## 11. Observer Discrimination Logic
+
+**Original**: Global aggregation of all events.
+**Flink**: Activity-aware filtering.
+
+* **Description**: The Observer ignores metric "batches" where no activity occurred (TP, FP, and FN are all zero). This prevents undefined MCC scores (NaN/0) from triggering unnecessary optimizations during data silences.
+
+---
+*Note: This document reflects the current state of the architecture and is subject to updates as the framework evolves.*

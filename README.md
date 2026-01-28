@@ -72,59 +72,66 @@ The original RTCEF framework uses native Python with Kafka for service communica
 
 ---
 
-## 🏗️ Architecture
+### System Architecture
 
-### Original RTCEF Architecture
+The project implements a **Hybrid Distributed Architecture** where long-running, stateful stream processing is handled by Flink (Java/Scala), and complex optimization logic is managed by PyFlink (Python).
 
-The RTCEF framework consists of five synergistic services communicating over Kafka:
+```mermaid
+graph TD
+    subgraph "Ingestion Cluster"
+        DF[data_feeder.py] -->|CSV Stream| KI[maritime_input topic]
+    end
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         INPUT STREAM                                │
-└─────────────────────────────────────────────────────────────────────┘
-                    │                           │
-                    ▼                           ▼
-            ┌───────────────┐           ┌───────────────┐
-            │    ENGINE     │           │   COLLECTOR   │
-            │   (Wayeb)     │           │               │
-            │               │           │  Sliding      │
-            │  CEF + CER    │           │  Window Data  │
-            └───────┬───────┘           └───────┬───────┘
-                    │                           │
-                    │ Scores                    │ Datasets
-                    ▼                           ▼
-            ┌───────────────┐           ┌───────────────┐
-            │   OBSERVER    │           │    FACTORY    │
-            │               │◄─────────►│               │
-            │ Trend-based   │           │  PST Training │
-            │ Monitoring    │           │  & Testing    │
-            └───────┬───────┘           └───────┬───────┘
-                    │                           │
-                    │ Instructions              │
-                    ▼                           │
-            ┌───────────────┐                   │
-            │  CONTROLLER   │◄──────────────────┘
-            │               │     Reports
-            │   Bayesian    │
-            │  Optimizer    │
-            └───────────────┘
+    subgraph "Flink Inference Job"
+        KI --> IJ[InferenceJob]
+        IJ -->|Predictions| OUT[Console Output]
+        IJ -- "Observer" --> INST[observer_instructions topic]
+        IJ -- "Collector" --> BUCK[CSV Buckets]
+    end
+
+    subgraph "PyFlink Controller"
+        INST --> CJ[Controller Job]
+        CJ -- "Bayesian Optimization" --> FC[factory_commands topic]
+        CJ -- "Pause/Play Sync" --> SYNC[enginesync topic]
+    end
+
+    subgraph "Flink Model Factory"
+        FC --> MFJ[ModelFactoryJob]
+        MFJ -->|Retrain/Optimize| MODS[saved_models/]
+        MFJ -- "Reports" --> REP[model_reports topic]
+        BUCK -.->|Assembles| dataset[dataset_version_X.csv]
+        dataset --> MFJ
+    end
+
+    SYNC --> IJ
+    REP --> CJ
 ```
 
-### Engine Architecture
+### Core Components
 
-The system follows a "Wrapper Pattern" where Flink handles the distributed stream processing and state management, while Wayeb handles the complex event logic.
+| Component | Responsibility | Technology |
+|-----------|----------------|------------|
+| **InferenceJob** | Live CEF/CER via Wayeb engines; Performance monitoring (Observer); Data bucketing (Collector). | Java 11 / Scala 2.12 |
+| **Controller** | Event-driven state machine for hyperparameter optimization; Coordinates pause/play protocol. | PyFlink (Python 3.9) |
+| **ModelFactory** | Computational heavy-lifting: dataset assembly, model training, and Bayesian evaluation. | Java 11 / Wayeb Core |
 
-| Component | Technology | Responsibility |
-|-------------| ------------- | -------------|
-|Stream Runner| Apache Flink (Java 11) | Reads CSV streams, partitions data by key (e.g., mmsi), and manages fault tolerance (State Backends). |
-| Core Engine | Wayeb (Scala 2.12) | Implements the Finite State Machine (FSM) and Probabilistic Suffix Trees (PST) for detection and forecasting. |
-| Bridge | FlinkEngine.java | A KeyedProcessFunction that initializes Wayeb lazily on workers and bridges Flink State to Wayeb's internal memory. |
+---
+
+## 🔄 Real-Time Model Adaptation
+
+Unlike traditional static models, Flink-RTCEF implements a **Synchronous Optimization Protocol** to handle data evolution without downtime:
+
+1. **Trigger**: The **Observer** detects low MCC performance and emits an `OPTIMIZE` instruction.
+2. **Pause**: The **Controller** issues a `PAUSE` command via `BroadcastState`, freezing inference at a specific `syncTimestamp`.
+3. **Optimize**: The **Controller** and **ModelFactory** execute a Bayesian "Ask-Tell" loop to find the best `pMin` and `gamma` parameters.
+4. **Deploy**: The **Controller** identifies the best model and issues a `PLAY` command with the path to the new `.spst` file.
+5. **Resume**: All distributed **WayebEngine** instances swap models at the exact `syncTimestamp` and resume processing.
 
 **How It Works**:
 
-> **_IMPORTANT:_** The ``Makefile`` allows to compile and train a sample model (**Training Phase**) to test the runtime phase but in practice, the initial training should be handled by the overall system.
+> ***IMPORTANT:*** The ``Makefile`` allows to compile and train a sample model (**Training Phase**) to test the runtime phase but in practice, the initial training should be handled by the overall system.
 
-1. **Training Phase (Offline)**: 
+1. **Training Phase (Offline)**:
    - **Compile**: Converts Symbolic Regular Expressions (``.sre``) into a Symbolic Finite Automaton (``.spst``).
 
    - **Learn (MLE)**: Replays historical streams to learn transition probabilities, generating a Markov Chain model (``.spst.mc``).
@@ -151,7 +158,7 @@ The system follows a "Wrapper Pattern" where Flink handles the distributed strea
 - **SBT**: For building Wayeb.
 - **Make**: To run the automated workflow.
 
-> **_NOTE:_**: On macOS/Linux, the `Makefile` attempts to auto-detect JDK paths. You can override them if detection fails or for custom setups:
+> ***NOTE:***: On macOS/Linux, the `Makefile` attempts to auto-detect JDK paths. You can override them if detection fails or for custom setups:
 >
 > ```bash
 > make build JAVA_HOME="/usr/lib/jvm/java-11"
@@ -172,7 +179,7 @@ cd flink-RTCEF
 make start
 ```
 
-The Flink Cluster UI should be available at http://localhost:8081. It is useful to check logs and graphs of each Flink jobs.
+The Flink Cluster UI should be available at <http://localhost:8081>. It is useful to check logs and graphs of each Flink jobs.
 
 **3. Run the project**
 
@@ -188,10 +195,9 @@ This command will:
 4. Compile an automaton from a given pattern and learn a predictive model from the given sample maritime dataset
 5. Upload the Flink Job to the Cluster and run the Job
 
-> **_IMPORTANT:_**: For now, this command is training a prediction model over sample maritime data and predicting over the SAME data. This is just for illustration purposes.
+> ***IMPORTANT:***: For now, this command is training a prediction model over sample maritime data and predicting over the SAME data. This is just for illustration purposes.
 
-> **_NOTE:_**: To bypass re-building and re-training Wayeb each time when testing Java code only, use **make build-flink** followed by **make submit** to build only Flin Java code and submit it to the Cluster.
-
+> ***NOTE:***: To bypass re-building and re-training Wayeb each time when testing Java code only, use **make build-flink** followed by **make submit** to build only Flin Java code and submit it to the Cluster.
 
 **4. Show forecast logs**
 
@@ -205,7 +211,7 @@ make logs
 make stop
 ```
 
-> **_NOTE:_**: You can always run ``make help`` to see available commands:
+> ***NOTE:***: You can always run ``make help`` to see available commands:
 >
 > ```bash
 > make help
@@ -240,19 +246,19 @@ $$MCC = \sqrt{Precision \times Recall \times Specificity \times NPV} - \sqrt{FDR
 
 ```
 .
-├── docs/                    # Documentation of the project
-├── Wayeb/                   # The Scala Core Library (Sub-module)
-│   ├── cef/                 # Main logic (Detection/Forecasting)
-│   └── patterns/            # Pattern definitions (.sre files)
-├── java/                    # The Flink Application
-│   ├── src/main/java/       # Flink Jobs (FlinkWayebJob, FlinkEngine)
-│   └── pom.xml              # Dependencies (Flink 1.17.2)
-├── data/                    # Shared volume for Docker
-│   └── save_models/         # Model saved during the different phases
-├── docker-compose.yaml      # Flink Cluster (JobManager + TaskManager)
-├── Makefile                 # Orchestration scripts
-└── README.md
+├── Makefile                 # Full system orchestration
+├── docker-compose.yaml      # Cluster setup (JobManager, TaskManager, Kafka)
+├── differences.md           # Technical rationale vs original RTCEF
+├── Wayeb/                   # Scala Core (CEF/CER Logic)
+├── java/                    # Flink Java App (Inference & Factory Jobs)
+│   └── src/main/java/       # Source code (Observers, Collectors, Engines)
+├── python/                  # Python Services
+│   ├── controller_job/      # PyFlink Optimizer State Machine
+│   ├── data_feeder.py       # Live stream simulator
+│   └── split_dataset.py     # Initial data preparation
+└── data/                    # Shared volume (Models, Buckets, Sets)
 ```
+
 ---
 
 ## 📖 References
@@ -268,11 +274,10 @@ $$MCC = \sqrt{Precision \times Recall \times Specificity \times NPV} - \sqrt{FDR
 
 This project is developed as part of the **Data System Research** module, a final year Computer Science course at **INSA Lyon**, supervised by **Riccardo Tommasini**.
 
-**Lizhi Zhang** - lizhi.zhang@insa-lyon.fr \
-**Rayan Hanader** - rayan.hanader@insa-lyon.fr \
-**Shuyan Dou** - shuyan.dou@insa-lyon.fr \
-**Remi Vialleton** - remi.vialleton@insa-lyon.fr
-
+**Lizhi Zhang** - <lizhi.zhang@insa-lyon.fr> \
+**Rayan Hanader** - <rayan.hanader@insa-lyon.fr> \
+**Shuyan Dou** - <shuyan.dou@insa-lyon.fr> \
+**Remi Vialleton** - <remi.vialleton@insa-lyon.fr>
 
 ---
 

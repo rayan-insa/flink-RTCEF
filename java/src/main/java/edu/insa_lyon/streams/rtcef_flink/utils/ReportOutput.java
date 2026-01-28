@@ -1,5 +1,11 @@
 package edu.insa_lyon.streams.rtcef_flink.utils;
 
+/**
+ * POJO representing a performance report output.
+ * 
+ * Aggregates both cumulative (runtime) and windowed (batch) performance 
+ * metrics for a given entity or the global system.
+ */
 public class ReportOutput {
     public long timestamp;
     public String key;
@@ -15,6 +21,9 @@ public class ReportOutput {
         this.batch = batch;
     }
 
+    /**
+     * Group of standard classification metrics based on a confusion matrix.
+     */
     public static class MetricGroup {
         public long tp, tn, fp, fn;
         public double precision, recall, f1;

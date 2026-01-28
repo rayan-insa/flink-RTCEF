@@ -1,0 +1,1 @@
+;(EQ(is_fraud,0.0),EQ(is_fraud,1.0)){order:2}{partitionBy:pan}{window:1000}

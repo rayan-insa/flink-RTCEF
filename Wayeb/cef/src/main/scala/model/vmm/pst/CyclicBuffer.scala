@@ -8,7 +8,7 @@ import model.vmm.Symbol
   *
   * @param size The buffer's size.
   */
-class CyclicBuffer(val size: Int) {
+class CyclicBuffer(val size: Int) extends Serializable {
   require(size > 0)
   private val buffer = new Array[Symbol](size)
   // Head is the pointer where the next symbol will be stored.
