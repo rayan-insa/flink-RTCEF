@@ -21,7 +21,7 @@ def main():
     parser.add_argument('--file', required=True, help='Path to CSV input file')
     parser.add_argument('--topic', default='input', help='Target Kafka topic')
     parser.add_argument('--bootstrap', default='kafka:29092', help='Kafka Bootstrap Servers')
-    parser.add_argument('--delay', type=float, default=0.1, help='Delay between records in seconds')
+    parser.add_argument('--delay', type=float, default=0, help='Delay between records in seconds')
     args = parser.parse_args()
 
     # Wait for Kafka to be ready

@@ -54,11 +54,14 @@ endif
 MODEL_OUTPUT   := $(DATA_DIR)/saved_models/tmp.spst
 
 # --- Flink Job Parameters ---
-MODEL_PATH         ?= /opt/flink/data/saved_models/tmp.spst
-HORIZON            ?= 600
-THRESHOLD          ?= 0.3
-MAX_SPREAD         ?= 5
-REPORTING_DISTANCE := 6000
+# Default parameters (can be overridden from command line like: make submit THRESHOLD=0.5)
+MODEL_PATH ?= /opt/flink/data/saved_models/tmp.spst
+HORIZON ?= 600
+THRESHOLD ?= 0.1
+MAX_SPREAD ?= 5
+REPORTING_DISTANCE ?= 600
+OPTI_DISTANCE ?= 0.10
+OBSERVER_GRACE ?= 0
 
 # --- Collector & Dataset Configuration ---
 # Bucket Size in Seconds (86400 = 24h). 
@@ -106,6 +109,9 @@ all: build
 # 1. Start Docker
 start:
 	@echo ">>> Starting Flink Cluster..."
+	mkdir -p lib
+	curl -o lib/flink-connector-kafka-1.17.2.jar https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka/1.17.2/flink-connector-kafka-1.17.2.jar
+	curl -o lib/kafka-clients-3.2.3.jar https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.2.3/kafka-clients-3.2.3.jar
 	docker compose up -d
 	@echo ">>> Waiting for JobManager at $(FLINK_JM_URL)..."
 	@until curl -s $(FLINK_JM_URL)/overview > /dev/null; do sleep 2; echo "   Waiting..."; done
@@ -169,6 +175,15 @@ build-wayeb:
 	# 1. 'publishM2': Puts the library in ~/.m2 so the Flink/Maven project can find it to compile code.
 	# 2. 'assembly': Creates the Fat Jar executable used to run the Training command.
 	cd $(WAYEB_DIR) && sbt "project cef" clean publishM2 assembly
+	@echo ">>> Installing Wayeb to local Maven Repository..."
+	# 2. Force-install the generated JAR to ~/.m2 so the Flink project can see the new 'getAttributes' method
+	mvn install:install-file \
+		-Dfile=$(WAYEB_JAR) \
+		-DgroupId=com.gitlab.elias \
+		-DartifactId=wayeb_2.12 \
+		-Dversion=0.6.0-SNAPSHOT \
+		-Dpackaging=jar \
+		-DgeneratePom=true
 
 # --- Build Flink Job (Java) ---
 build-flink:
@@ -209,7 +224,7 @@ submit-inference:
 	JAR_ID=$$(echo $$RESPONSE | grep -o '"filename":"[^"]*"' | cut -d'"' -f4 | xargs basename); \
 	echo "   -> Uploaded Jar ID: $$JAR_ID"; \
 	echo "   -> Starting InferenceJob..."; \
-	curl -X POST "http://$(FLINK_JM_URL)/jars/$$JAR_ID/run?entry-class=$(JOB_CLASS)&program-args=--modelPath+$(MODEL_PATH)+--inputTopic+$(INPUT_TOPIC)+--instructions-topic+observer_instructions+--model-reports-topic+model_reports+--datasets-topic+dataset_versions+--assembly-topic+assembly_reports+--horizon+$(HORIZON)+--threshold+$(THRESHOLD)+--maxSpread+$(MAX_SPREAD)+--inputSource+kafka+--observer-optimize-diff+0.001+--observer-grace+0+--reportingDistance+$(REPORTING_DISTANCE)+--bucketSize+$(BUCKET_SIZE_SEC)+--lastK+$(HISTORY_K)+--naming+$(NAMING_PREFIX)+--idField+$(ID_FIELD)+--timestampField+$(TIMESTAMP_FIELD)"
+	curl -X POST "http://$(FLINK_JM_URL)/jars/$$JAR_ID/run?entry-class=$(JOB_CLASS)&program-args=--modelPath+$(MODEL_PATH)+--inputTopic+maritime_input+--instructions-topic+observer_instructions+--model-reports-topic+model_reports+--datasets-topic+dataset_versions+--assembly-topic+assembly_reports+--horizon+$(HORIZON)+--threshold+$(THRESHOLD)+--maxSpread+$(MAX_SPREAD)+--inputSource+kafka+--observer-optimize-diff+${OPTI_DISTANCE}+--observer-grace+${OBSERVER_GRACE}+--reportingDistance+${REPORTING_DISTANCE}+--bucketSize+$(BUCKET_SIZE_SEC)+--lastK+$(HISTORY_K)+--naming+$(NAMING_PREFIX)"
 	
 	@echo "\nInferenceJob Submitted!"
 
@@ -232,7 +247,7 @@ submit-controller:
 		-e REPORT_TOPIC=model_reports \
 		-e COMMAND_TOPIC=factory_commands \
 		-e SYNC_TOPIC=enginesync \
-		jobmanager flink run -Dpipeline.jars="file:///opt/flink/lib/flink-connector-kafka-1.17.2.jar;file:///opt/flink/lib/kafka-clients-3.2.3.jar" -py /opt/flink/python_code/controller_job/main.py
+		jobmanager flink run -py /opt/flink/python_code/controller_job/main.py
 	@echo "Controller Job Submitted!"
 
 run-feeder:

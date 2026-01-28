@@ -2,6 +2,7 @@ package edu.insa_lyon.streams.rtcef_flink;
 
 import org.apache.flink.streaming.api.functions.co.CoProcessFunction;
 import org.apache.flink.util.OutputTag;
+import scala.collection.JavaConverters;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ArrayNode;
@@ -189,75 +190,57 @@ public class Collector extends CoProcessFunction<GenericEvent, String, String> {
      * core I/O: Open, Append, Close.
      */
     private void writeRecordToBucket(long bucketId, GenericEvent event) throws IOException {
-        String filename = namingPrefix + bucketId;
-        if (getRuntimeContext().getNumberOfParallelSubtasks() > 1) {
-             filename += "_part-" + subtaskIndex;
-        }
-        
-        Path path = Paths.get(outputPath, filename);
-
-        // Write JSONL format (Data Agnostic) using `event.attributes()` map from Wayeb
-        // We need to convert the Wayeb/Scala map OR reconstructing it from the event values.
-        // GenericEvent usually keeps attributes in a specific way.
-        // However, we don't have direct access to "all" attributes via a simple java map from GenericEvent easily 
-        // without casting/conversion if it's a Scala map. 
-        // But WayebAdapter created it, so it's a GenericEvent.
-        // Let's use the `event` object's methods or providing a way to serialize it.
-
-        // Actually, for simplicity and performance in Java without dragging in full Scala JSON interaction:
-        // We successfully accessed `event.getValueOf("field")` before.
-        // But to be AGNOSTIC, we need all fields.
-        // `GenericEvent` in Wayeb (Scala) -> has `payload: Map[String, Any]`?
-        // Let's rely on constructing a Map from known attributes? NO, that's what we want to avoid.
-        
-        // BETTER APPROACH:
-        // The `JsonEventParser` put all JSON fields into the attributes map.
-        // We should try to serialize that map.
-        
-        // Strategy: Cast to specific Wayeb class if possible or iterate known keys?
-        // Since we don't know keys (Agnostic), we need to iterate the event's payload.
-        // `GenericEvent` interface in Wayeb: `def payload: Map[String, Any]`
-        
-        // Let's try to convert Scala Map to Java Map or just build an ObjectNode.
-        ObjectNode json = mapper.createObjectNode();
-        
-        // We can't easily iterate Scala map from Java without `JavaConverters`.
-        // Let's assume we can get the keys if we know them? No.
-        
-        // RE-STRATEGY: 
-        // Use `ui.WayebAdapter.eventToMap(event)` helper if it existed?
-        // Or simply add `JavaConverters` usage here.
-        // Use `getAttributes()` which we just added to GenericEvent.scala
-        java.util.Map<String, Object> attributes = scala.collection.JavaConverters.mapAsJavaMap(event.getAttributes());
-        
-        for (java.util.Map.Entry<String, Object> entry : attributes.entrySet()) {
-             String key = entry.getKey();
-             Object val = entry.getValue();
-             if (val instanceof Double) json.put(key, (Double) val);
-             else if (val instanceof Long) json.put(key, (Long) val);
-             else if (val instanceof Integer) json.put(key, (Integer) val);
-             else if (val instanceof Boolean) json.put(key, (Boolean) val);
-             else json.put(key, val.toString());
-        }
-        
-        // Ensure standard fields are present
-        json.put("timestamp", event.timestamp());
-        // json.put("id", event.id()); // "mmsi" or "symbol" is likely already in payload?
-        // If "mmsi" key is in payload it will be written.
-
-        String line = mapper.writeValueAsString(json) + System.lineSeparator();
-
-        // BLOCKING I/O
-        try {
-            Files.write(path, line.getBytes(StandardCharsets.UTF_8), 
-                StandardOpenOption.CREATE, 
-                StandardOpenOption.APPEND, 
-                StandardOpenOption.SYNC); // SYNC ensures flush to hardware (OS buffer bypass)
-        } catch (IOException e) {
-            LOG.error("Failed to write record to {}: {}", path, e.getMessage());
-            throw e; // Fail job to trigger retry
-        }
+    String filename = namingPrefix + bucketId;
+    if (getRuntimeContext().getNumberOfParallelSubtasks() > 1) {
+            filename += "_part-" + subtaskIndex;
     }
+    
+    Path path = Paths.get(outputPath, filename);
+
+    
+    // 1. Convert Scala Map (from Wayeb) to Java Map
+    // This requires that you have added getAttributes() to GenericEvent.scala as discussed previously
+    java.util.Map<String, Object> attributes = JavaConverters.mapAsJavaMap(event.getAttributes());
+
+    // 2. Create a JSON Object
+    ObjectNode json = mapper.createObjectNode();
+
+    // 3. Add all dynamic attributes (lat, lon, critical_bitstring, etc.)
+    // This loop ensures we never lose data, even if fields change in the future.
+    for (java.util.Map.Entry<String, Object> entry : attributes.entrySet()) {
+        String key = entry.getKey();
+        Object val = entry.getValue();
+
+        // Safe typing for Jackson
+        if (val instanceof Double) json.put(key, (Double) val);
+        else if (val instanceof Integer) json.put(key, (Integer) val);
+        else if (val instanceof Long) json.put(key, (Long) val);
+        else if (val instanceof Boolean) json.put(key, (Boolean) val);
+        else json.put(key, val.toString());
+    }
+
+    // 4. Ensure Mandatory Metadata exists
+    // (If MaritimeParser didn't put them in the map, we add them now)
+    if (!json.has("timestamp")) json.put("timestamp", event.timestamp());
+    if (!json.has("id")) json.put("id", String.valueOf(event.id())); 
+    // Note: Your JSON parser likely mapped "mmsi" -> "id", so "id" might be redundant if "mmsi" is there.
+
+    // 5. Serialize to String (JSON Line)
+    String line = mapper.writeValueAsString(json) + System.lineSeparator();
+
+    // --- FIX ENDS HERE ---
+
+    // BLOCKING I/O
+    try {
+        Files.write(path, line.getBytes(StandardCharsets.UTF_8), 
+            StandardOpenOption.CREATE, 
+            StandardOpenOption.APPEND, 
+            StandardOpenOption.SYNC); 
+    } catch (IOException e) {
+        LOG.error("Failed to write record to {}: {}", path, e.getMessage());
+        throw e; 
+    }
+}
 
     private void emitDatasetNotification(org.apache.flink.util.Collector<String> out) throws IOException {
         // Prepare Bucket Range (Last K or less)

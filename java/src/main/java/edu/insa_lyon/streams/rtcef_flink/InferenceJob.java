@@ -78,7 +78,7 @@ public class InferenceJob {
         String inputTopic = params.get("inputTopic", "maritime_input");
         
         int horizon = params.getInt("horizon", 600);
-        double runConfidenceThreshold = params.getDouble("threshold", 0.3);
+        double runConfidenceThreshold = params.getDouble("threshold", 0.1);
         int maxSpread = params.getInt("maxSpread", 5);
 
         // Collector Params
@@ -97,7 +97,7 @@ public class InferenceJob {
         final double obsTrainDiff = params.getDouble("observer-train-diff", 0.05);
         final double obsOptDiff = params.getDouble("observer-optimize-diff", 0.10);
         final double obsLowScore = params.getDouble("observer-low-score", 0.1);
-        final int obsGrace = params.getInt("observer-grace", 3);
+        final int obsGrace = params.getInt("observer-grace", 0);
         final String instructionsTopic = params.get("instructions-topic", "observer_instructions");
 
         // Construct full path prefix for notifications
@@ -113,14 +113,9 @@ public class InferenceJob {
         // 2. Setup Data Sources
         // =========================================================================
         
-        // A. Maritime/Generic Events (Kafka Only)
+        // A. Maritime Events (Kafka Only)
         // User requested to remove File Source support.
         DataStream<GenericEvent> mainStream;
-        
-        // Generic Input Params
-        String idField = params.get("idField", "mmsi");
-        String timestampField = params.get("timestampField", "timestamp");
-        String eventType = params.get("eventType", "AIS");
 
         KafkaSource<String> maritimeSource = KafkaSource.<String>builder()
             .setBootstrapServers(kafkaServers)
@@ -134,7 +129,7 @@ public class InferenceJob {
             
         mainStream = env
             .fromSource(maritimeSource, WatermarkStrategy.noWatermarks(), "Maritime Kafka Source")
-            .flatMap(new JsonEventParser(idField, timestampField, eventType));
+            .flatMap(new MaritimeParser());
 
         mainStream = mainStream.assignTimestampsAndWatermarks(
             WatermarkStrategy.<GenericEvent>forBoundedOutOfOrderness(Duration.ofSeconds(60))
@@ -188,12 +183,8 @@ public class InferenceJob {
         if (params.getInt("parallelism", 1) > 1) {
             // Distribute by ID for scaling (Generic Agnostic)
             // Use the configured ID field for keying
-            final String keyField = idField; 
             notificationStream = mainStream
-                .keyBy(e -> {
-                     Object val = e.getValueOf(keyField);
-                     return (val != null) ? val.toString() : e.id(); 
-                })
+                .keyBy(e -> e.getValueOf("mmsi").toString())
                 .connect(feedbackStream.broadcast()) 
                 .process(new Collector(outputPath, namingPrefix, bucketSizeSec, lastK));
         } else {
@@ -220,12 +211,8 @@ public class InferenceJob {
         // =========================================================================
         // 5. Branch C: Wayeb Engine (Detection & Forecasting with Dynamic Models)
         // =========================================================================
-        final String engineKeyField = idField;
         SingleOutputStreamOperator<ReportOutput> reportStream = mainStream
-            .keyBy(e -> {
-                 Object val = e.getValueOf(engineKeyField);
-                 return (val != null) ? val.toString() : e.id(); 
-            })
+            .keyBy(e -> e.getValueOf("mmsi").toString())
             .connect(broadcastStream) 
             .process(new WayebEngine(
                 loadPath,
