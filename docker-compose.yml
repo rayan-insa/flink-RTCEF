@@ -18,6 +18,8 @@ services:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
       - ./lib/flink-connector-kafka-1.17.2.jar:/opt/flink/lib/flink-connector-kafka-1.17.2.jar
       - ./lib/kafka-clients-3.2.3.jar:/opt/flink/lib/kafka-clients-3.2.3.jar
+      - ./log4j2.properties:/opt/flink/conf/log4j-console.properties
+      - ./logs:/opt/flink/log
       - ./data:/opt/flink/data  # Mounting data folder to /opt/flink/data container-side
       - ./python:/opt/flink/python_code # Mount python code
 
@@ -42,6 +44,8 @@ services:
       - ./Wayeb/cef/target/scala-2.12/wayeb-0.6.0-SNAPSHOT.jar:/opt/flink/lib/wayeb.jar
       - ./lib/flink-connector-kafka-1.17.2.jar:/opt/flink/lib/flink-connector-kafka-1.17.2.jar
       - ./lib/kafka-clients-3.2.3.jar:/opt/flink/lib/kafka-clients-3.2.3.jar
+      - ./log4j2.properties:/opt/flink/conf/log4j-console.properties
+      - ./logs:/opt/flink/log
       - ./data:/opt/flink/data  # Mounting data folder here is critical
       - ./python:/opt/flink/python_code
 

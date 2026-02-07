@@ -279,14 +279,14 @@ object WayebCLI {
               if (fsmModelsForecasting.contains(x)) success
               else failure("FSM model should be one of " + fsmModelsForecasting)).
             text("Specify the automaton model."),
-          opt[Int]("pMin").valueName("pMin>0 and pMin<1.0").
+          opt[Double]("pMin").valueName("pMin>0 and pMin<1.0").
             action((x, c) => c.copy(pMin = x)).
             text("This is the symbol threshold. Symbols with lower probability are discarded."),
-          opt[Int]("alpha").valueName("alpha>0 and alpha<1.0").
+          opt[Double]("alpha").valueName("alpha>0 and alpha<1.0").
             action((x, c) => c.copy(alpha = x)).
             text("Used to calculate the conditional threshold = (1 + alpha) * gammaMin.\n" +
               " The conditional on the expanded context must be greater than this threshold."),
-          opt[Int]("gammaMin").valueName("gammaMin>0 and gammaMin<1.0").
+          opt[Double]("gammaMin").valueName("gammaMin>0 and gammaMin<1.0").
             action((x, c) => c.copy(gammaMin = x)).
             text("Used to calculate the conditional threshold = (1 + alpha) * gammaMin.\n" +
               " The conditional on the expanded context must be greater than this threshold.\n" +

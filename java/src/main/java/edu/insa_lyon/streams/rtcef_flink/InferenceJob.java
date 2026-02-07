@@ -96,7 +96,7 @@ public class InferenceJob {
         final long reportingDistance = params.getLong("reportingDistance", 600); // 10 min in event time seconds
         final double obsTrainDiff = params.getDouble("observer-train-diff", 0.05);
         final double obsOptDiff = params.getDouble("observer-optimize-diff", 0.10);
-        final double obsLowScore = params.getDouble("observer-low-score", 0.1);
+        final double obsLowScore = params.getDouble("observer-low-score", 0.2);
         final int obsGrace = params.getInt("observer-grace", 0);
         final String instructionsTopic = params.get("instructions-topic", "observer_instructions");
 
@@ -228,9 +228,29 @@ public class InferenceJob {
         DataStream<PredictionOutput> predictionStream = reportStream
             .getSideOutput(WayebEngine.PRED_TAG);
 
-        reportStream.print("LOCAL_REPORT");
-        detectionStream.print("ALERT");
-        predictionStream.print("FORECAST");
+        reportStream.addSink(new org.apache.flink.streaming.api.functions.sink.SinkFunction<ReportOutput>() {
+            @Override
+            public void invoke(ReportOutput value, Context context) {
+                // This uses the SLF4J Logger, which writes to your file AND the console
+                LOG.info("LOCAL_REPORT: {}", value);
+            }
+        }).name("Log localReports");
+
+        detectionStream.addSink(new org.apache.flink.streaming.api.functions.sink.SinkFunction<String>() {
+            @Override
+            public void invoke(String value, Context context) {
+                // This uses the SLF4J Logger, which writes to your file AND the console
+                LOG.info("DETECTION: {}", value);
+            }
+        }).name("Log detections");
+
+        predictionStream.addSink(new org.apache.flink.streaming.api.functions.sink.SinkFunction<PredictionOutput>() {
+            @Override
+            public void invoke(PredictionOutput value, Context context) {
+                // This uses the SLF4J Logger, which writes to your file AND the console
+                LOG.info("FORECAST: {}", value, value.isPositive ? " (POSITIVE)" : " (NEGATIVE)");
+            }
+        }).name("Log predictions");
 
         // =========================================================================
         // 6. Branch D: In-Job Observer (Aggregation -> Decision)
@@ -238,10 +258,17 @@ public class InferenceJob {
         
         // 1. GLOBAL AGGREGATION (Map-Reduce)
         DataStream<ReportOutput> globalReports = reportStream
-            .windowAll(TumblingEventTimeWindows.of(Time.milliseconds(reportingDistance)))
-            .reduce(new MetricsAggregator());
+            .windowAll(TumblingEventTimeWindows.of(Time.seconds(reportingDistance)))
+            .allowedLateness(Time.hours(1)) 
+            .process(new MetricsAggregator());
             
-        globalReports.print("GLOBAL_REPORT");
+        globalReports.addSink(new org.apache.flink.streaming.api.functions.sink.SinkFunction<ReportOutput>() {
+            @Override
+            public void invoke(ReportOutput value, Context context) {
+                // This uses the SLF4J Logger, which writes to your file AND the console
+                LOG.info("GLOBAL_REPORT: {}", value);
+            }
+        }).name("Log globalReports");
 
         // 2. OBSERVER DECISION
         DataStream<String> instructions = globalReports
@@ -253,7 +280,13 @@ public class InferenceJob {
                 obsGrace
             ));
 
-        instructions.print("INSTRUCTION");
+        instructions.addSink(new org.apache.flink.streaming.api.functions.sink.SinkFunction<String>() {
+            @Override
+            public void invoke(String value, Context context) {
+                // This uses the SLF4J Logger, which writes to your file AND the console
+                LOG.info("INSTRUCTION: {}", value);
+            }
+        }).name("Log Instructions");
 
         // 3. KAFKA SINK
         if ("file".equalsIgnoreCase(inputSource)) {

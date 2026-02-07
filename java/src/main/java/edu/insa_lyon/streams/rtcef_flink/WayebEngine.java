@@ -126,6 +126,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
     private transient ForecasterRun forecasterEngine;
     private transient WtProfiler profiler;
     private transient ObjectMapper jsonMapper;
+    private transient ReadOnlyContext currentCtx;
 
     // Last seen event time (per operator instance, not keyed state)
     // Used mainly for calculating synchronization point in processBroadcastElement if possible
@@ -185,7 +186,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
         if (runEngine != null) {
             LOG.info("Swapping running engines to new model...");
             Tuple5<fsm.symbolic.sra.Configuration, Object, CyclicBuffer, Match, Object> snapshot = runEngine.snapshotState();
-            initializeEngineInternal(null); 
+            initializeEngineInternal(); 
             runEngine.restoreState(snapshot._1(), (Boolean)snapshot._2(), snapshot._3(), snapshot._4(), (Long)snapshot._5());
             LOG.info("Engine swapped successfully.");
         }
@@ -222,6 +223,8 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
      */
     @Override
     public void processElement(GenericEvent event, ReadOnlyContext ctx, Collector<ReportOutput> out) throws Exception {
+        this.currentCtx = ctx;
+
         this.lastEventTime = event.timestamp();
         
         // 1. Check for SYNC commands (pause/play) in broadcast state FIRST
@@ -290,7 +293,7 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
 
         // 4. Engine Check
         if (runEngine == null) {
-            initializeEngineInternal(ctx);
+            initializeEngineInternal();
         }
 
         if (statsOffsetState.value() == null) {
@@ -426,7 +429,10 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
         }
     }
 
-    private void initializeEngineInternal(ReadOnlyContext ctx) throws Exception {
+    private void initializeEngineInternal() throws Exception {
+        if (statsHistoryState != null) statsHistoryState.clear();
+        if (statsOffsetState != null) statsOffsetState.clear();
+        
         runEngine = Run$.MODULE$.apply(1, this.fsm);
 
         scala.collection.immutable.List predList = this.predProvider.provide();
@@ -442,17 +448,17 @@ public class WayebEngine extends KeyedBroadcastProcessFunction<String, GenericEv
                 if (pred.isValid()) {
                     PredictionOutput output = new PredictionOutput(
                         rm.timestamp(),
-                        (ctx != null) ? ctx.getCurrentKey() : "unknown", 
+                        (currentCtx != null) ? currentCtx.getCurrentKey() : "unknown", 
                         pred.prob(),
                         pred.startRelativeToNow(),
                         pred.endRelativeToNow(),
                         pred.isPositive()
                     );
-                    if (ctx != null) ctx.output(PRED_TAG, output);
+                    if (currentCtx != null) currentCtx.output(PRED_TAG, output);
                 }
 
                 if (rm.fmDetected()) {
-                    if (ctx != null) ctx.output(MATCH_TAG, "Detected Pattern at " + rm.timestamp());
+                    if (currentCtx != null) currentCtx.output(MATCH_TAG, "TIMESTAMP=" + rm.timestamp() + " fmDetected=" + rm.fmDetected() + " currentState=" + rm.currentState() + " matchEvent=" + rm.matchedEvents().toString());
                 }
             }
             @Override

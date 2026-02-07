@@ -3,24 +3,28 @@ package edu.insa_lyon.streams.rtcef_flink;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.util.Collector;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 
 import stream.GenericEvent;
-import java.util.Iterator;
 import scala.Tuple2;
 import scala.collection.immutable.Map$;
 import scala.collection.mutable.Builder;
 
 /**
  * Parser for maritime AIS data in JSONL format.
- * * Converts JSON objects into Wayeb GenericEvent objects.
- * Handles dynamic typing to ensure Integers remain Integers (crucial for FSM guards).
+ * Matches logic of MaritimeWAStreamSourceJSON.scala exactly:
+ * - Forces Doubles for metrics
+ * - Expands critical_bitstring
+ * - Renames specific fields (trh -> heading)
  */
 public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
 
     private transient ObjectMapper mapper;
     private int counter;
+    private static final Logger LOG = LoggerFactory.getLogger(MaritimeParser.class);
 
     @Override
     public void open(Configuration parameters) throws Exception {
@@ -31,70 +35,112 @@ public class MaritimeParser extends RichFlatMapFunction<String, GenericEvent> {
 
     @Override
     public void flatMap(String line, Collector<GenericEvent> out) {
-        if (line == null || line.trim().isEmpty()) {
-            return;
-        }
+        if (line == null || line.trim().isEmpty()) return;
 
         try {
             JsonNode root = mapper.readTree(line);
-
-            // 1. Extract Mandatory Metadata
             if (!root.has("timestamp")) return;
-            long timestamp = root.get("timestamp").asLong();
             
-            // "mmsi" is usually the ID, defaulting to "unknown" if missing
-            String mmsi = root.has("mmsi") ? root.get("mmsi").asText() : "unknown";
+            // 1. Extract Timestamp (Long)
+            long timestamp = root.get("timestamp").asLong();
 
-            // 2. Build Scala Map dynamically
-            // We use a specific Scala builder to construct the immutable map required by GenericEvent
+            // 2. Prepare Scala Map Builder
             @SuppressWarnings("unchecked")
             Builder<Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>> builder = 
                 (Builder<Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>>) (Builder<?, ?>) Map$.MODULE$.newBuilder();
 
-            // 3. Iterate over all JSON fields
-            Iterator<String> fieldNames = root.fieldNames();
-            while (fieldNames.hasNext()) {
-                String fieldName = fieldNames.next();
-                JsonNode node = root.get(fieldName);
-                Object value = null;
+            // 3. Explicitly Extract and Map Fields (Matching Scala Logic)
+            
+            // Identity Strings
+            String mmsi = root.path("mmsi").asText("");
+            builder.$plus$eq(new Tuple2<>("mmsi", mmsi));
 
-                // CRITICAL LOGIC FIX: Preserve Numeric Types
-                if (node.isNumber()) {
-                    if (node.isIntegralNumber()) {
-                        // If it's an integer (like change_in_heading: 1), keep it as Int
-                        // Wayeb patterns often check equality (x == 1), which fails if x is 1.0
-                        if (node.canConvertToInt()) {
-                            value = node.asInt();
-                        } else {
-                            value = node.asLong();
-                        }
-                    } else {
-                        // Decimals (speed, lat, lon) remain Double
-                        value = node.asDouble();
-                    }
-                } else if (node.isBoolean()) {
-                    value = node.asBoolean();
-                } else if (node.isTextual()) {
-                    value = node.asText();
-                }
+            // Metrics (Force Double)
+            builder.$plus$eq(new Tuple2<>("lon", root.path("lon").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("lat", root.path("lat").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("speed", root.path("speed").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("cog", root.path("cog").asDouble(0.0)));
+            
+            // Renamed Fields (trh -> heading)
+            builder.$plus$eq(new Tuple2<>("heading", root.path("trh").asDouble(0.0)));
 
-                // Add to builder if value is valid
-                if (value != null) {
-                    builder.$plus$eq(new Tuple2<>(fieldName, value));
-                }
-            }
+            // Context/Entry/Exit Fields (Force Double)
+            builder.$plus$eq(new Tuple2<>("entryNearcoast", root.path("entry_nearcoast").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("entryNearcoast5k", root.path("entry_nearcoast5k").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("entryFishing", root.path("entry_fishing").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("entryNatura", root.path("entry_natura").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("entryNearports", root.path("entry_nearports").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("entryAnchorage", root.path("entry_anchorage").asDouble(0.0)));
 
-            // 4. Finalize Map
+            builder.$plus$eq(new Tuple2<>("exitNearcoast", root.path("exit_nearcoast").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("exitNearcoast5k", root.path("exit_nearcoast5k").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("exitFishing", root.path("exit_fishing").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("exitNatura", root.path("exit_natura").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("exitNearports", root.path("exit_nearports").asDouble(0.0)));
+            builder.$plus$eq(new Tuple2<>("exitAnchorage", root.path("exit_anchorage").asDouble(0.0)));
+
+            // Next Timestamp (Long -> nextCETimestamp)
+            long nextTs = root.path("next_timestamp").asLong(0L);
+            builder.$plus$eq(new Tuple2<>("nextCETimestamp", nextTs));
+
+            // Gap Start Logic
+            double gapStart = (timestamp == -1) ? 1.0 : 0.0;
+            builder.$plus$eq(new Tuple2<>("gap_start", gapStart));
+
+            // 4. Expand Annotation Bitstring
+            String annotation = root.path("critical_bitstring").asText("");
+            expandAnnotation(annotation, builder);
+
+            // 5. Build Event
             scala.collection.immutable.Map<String, Object> scalaArgs = builder.result();
-
-            // 5. Emit Event
-            // "SampledCritical" is the event type used in your previous CSV parser
+            
+            // NOTE: Using "SampledCritical" to match your uploaded Scala file.
             GenericEvent event = new GenericEvent(counter++, "SampledCritical", timestamp, scalaArgs);
+            
             out.collect(event);
 
         } catch (Exception e) {
-            // Log parsing errors if necessary, or skip bad lines
-            // System.err.println("Failed to parse line: " + line);
+            // LOG.error("Error parsing event", e);
+        }
+    }
+
+    /**
+     * Replicates the annotationExpansion logic from Scala.
+     * Maps bitstring positions to specific feature flags.
+     */
+    private void expandAnnotation(String ann, Builder<Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>> builder) {
+        if ("-1".equals(ann)) {
+            add(builder, "stop_start", -1.0);
+            add(builder, "stop_end", -1.0);
+            add(builder, "slow_motion_start", -1.0);
+            add(builder, "slow_motion_end", -1.0);
+            add(builder, "gap_end", -1.0);
+            add(builder, "change_in_heading", -1.0);
+            add(builder, "change_in_speed_start", -1.0);
+            add(builder, "change_in_speed_end", -1.0);
+        } else if (ann != null && ann.length() >= 8) {
+            // Scala slice(start, end) matches Java substring(start, end)
+            // String: "01234567" (indices)
+            add(builder, "stop_start", parseDouble(ann, 7, 8));
+            add(builder, "stop_end", parseDouble(ann, 6, 7));
+            add(builder, "slow_motion_start", parseDouble(ann, 5, 6));
+            add(builder, "slow_motion_end", parseDouble(ann, 4, 5));
+            add(builder, "gap_end", parseDouble(ann, 3, 4));
+            add(builder, "change_in_heading", parseDouble(ann, 2, 3));
+            add(builder, "change_in_speed_start", parseDouble(ann, 1, 2));
+            add(builder, "change_in_speed_end", parseDouble(ann, 0, 1));
+        }
+    }
+
+    private void add(Builder<Tuple2<String, Object>, scala.collection.immutable.Map<String, Object>> builder, String key, Double val) {
+        builder.$plus$eq(new Tuple2<>(key, val));
+    }
+
+    private Double parseDouble(String s, int start, int end) {
+        try {
+            return Double.parseDouble(s.substring(start, end));
+        } catch (Exception e) {
+            return 0.0;
         }
     }
 }

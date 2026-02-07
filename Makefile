@@ -38,19 +38,15 @@ else
     INPUT_PATH      := $(DATA_DIR)/maritime-eval.jsonl
     ID_FIELD        := mmsi
     TIMESTAMP_FIELD := timestamp
-    DOMAIN_TYPE     := json
+    DOMAIN_TYPE     := maritimejson
 endif
 
 # --- Kafka Topics ---
 INPUT_TOPIC := $(DATASET)_input
 
 # --- Training Configuration ---
-TRAIN_PATTERNS := $(WAYEB_DIR)/patterns/$(DATASET)/fraud/pattern.sre
-TRAIN_DECLS    := $(WAYEB_DIR)/patterns/$(DATASET)/fraud/declarations.sre
-ifeq ($(DATASET),maritime)
-    TRAIN_PATTERNS := $(WAYEB_DIR)/patterns/maritime/port/pattern.sre
-    TRAIN_DECLS    := $(WAYEB_DIR)/patterns/maritime/port/declarationsDistance1.sre
-endif
+TRAIN_PATTERNS := $(DATA_DIR)/pattern.sre
+TRAIN_DECLS    := $(DATA_DIR)/declarations.sre
 MODEL_OUTPUT   := $(DATA_DIR)/saved_models/tmp.spst
 
 # --- Flink Job Parameters ---
@@ -59,9 +55,9 @@ MODEL_PATH ?= /opt/flink/data/saved_models/tmp.spst
 HORIZON ?= 600
 THRESHOLD ?= 0.1
 MAX_SPREAD ?= 5
-REPORTING_DISTANCE ?= 600
+REPORTING_DISTANCE ?= 3600
 OPTI_DISTANCE ?= 0.10
-OBSERVER_GRACE ?= 0
+OBSERVER_GRACE ?= 3
 
 # --- Collector & Dataset Configuration ---
 # Bucket Size in Seconds (86400 = 24h). 
@@ -101,17 +97,27 @@ help:
 	@echo "  make clean       -> Remove all build artifacts and temp files"
 	@echo "  make logs        -> View TaskManager logs"
 	@echo "  make status      -> Show running jobs"
+	@echo "  make results      -> Compute results and generate visualizations"
 	@echo "================================================================"
 
 # Alias for building everything
 all: build
 
 # 1. Start Docker
-start:
+start: build-wayeb
 	@echo ">>> Starting Flink Cluster..."
+	# Create folders locally to prevent Docker from creating them as 'root'
 	mkdir -p lib
+	mkdir -p logs
+	mkdir -p data
+	# Ensure the container (User 9999) can write to them
+	chmod 777 logs data
+	
+	# Download dependencies
 	curl -o lib/flink-connector-kafka-1.17.2.jar https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka/1.17.2/flink-connector-kafka-1.17.2.jar
 	curl -o lib/kafka-clients-3.2.3.jar https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.2.3/kafka-clients-3.2.3.jar
+	
+	# Start Docker
 	docker compose up -d
 	@echo ">>> Waiting for JobManager at $(FLINK_JM_URL)..."
 	@until curl -s $(FLINK_JM_URL)/overview > /dev/null; do sleep 2; echo "   Waiting..."; done
@@ -154,6 +160,15 @@ run-all-jobs: init-kafka prepare-data
 	@$(MAKE) run-feeder
 	@echo "\n>>> All jobs submitted! Use 'make status' to verify."
 
+results:
+	@echo ">>> Parsing log file"
+	@docker compose exec \
+		jobmanager python3 /opt/flink/python_code/log_parser.py /opt/flink/log/inference_job.log /opt/flink/data/metrics.csv
+	@docker compose exec \
+		jobmanager python3 /opt/flink/python_code/viz.py /opt/flink/data/metrics.csv /opt/flink/data/results.png
+	@docker compose exec \
+		jobmanager python3 /opt/flink/python_code/viz.py /opt/flink/data/baseline_metrics.csv /opt/flink/data/baseline_results.png
+
 # ==============================================================================
 # SUB-TASKS
 # ==============================================================================
@@ -193,7 +208,7 @@ build-flink:
 # --- Prepare Data (Split) ---
 prepare-data:
 	@echo ">>> Splitting Dataset..."
-	@python3 python/split_dataset.py --file $(INPUT_PATH) --train-pct 0.20 --output-dir $(DATA_DIR)
+	@python3 python/split_dataset.py --file $(INPUT_PATH) --train-pct 0.2 --output-dir $(DATA_DIR)
 
 # --- Train Model ---
 # We bootstrap the initial model (tmp.spst) using the training slice.
@@ -210,7 +225,10 @@ train: prepare-data
 		--declarations:$(TRAIN_DECLS) \
 		--stream:$(DATA_DIR)/train.jsonl \
 		--domainSpecificStream:$(DOMAIN_TYPE) \
-		--outputSpst:$(MODEL_OUTPUT)
+		--outputSpst:$(MODEL_OUTPUT) \
+		--pMin:0.0 \
+		--gammaMin:0.001 \
+		--alpha:1.05
 	
 	@echo "Model saved to: $(MODEL_OUTPUT)"
 
@@ -252,7 +270,7 @@ submit-controller:
 
 run-feeder:
 	@echo ">>> Starting Async Data Feeder..."
-	@docker compose exec -d jobmanager python3 /opt/flink/python_code/data_feeder.py --file /opt/flink/data/infer.jsonl --topic $(INPUT_TOPIC) --delay 0.1
+	@docker compose exec -d jobmanager python3 /opt/flink/python_code/data_feeder.py --file /opt/flink/data/infer.jsonl --topic $(INPUT_TOPIC) --delay 0
 	@echo "Data Feeder running in background!"
 
 # --- Initialize Kafka Topics ---
@@ -269,7 +287,6 @@ init-kafka:
 	@docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list
 	@echo "Waiting 5s for Kafka propagation..."
 	@sleep 5
-
 
 logs:
 	docker compose logs -f taskmanager
@@ -303,6 +320,7 @@ clean:
 	@echo ">>> Cleaning all artifacts..."
 	rm -rf $(DATA_DIR)/saved_models/*	
 	rm -rf $(DATA_DIR)/buckets/*
-	rm -rf $(DATA_DIR)/datasets/*	
+	rm -rf $(DATA_DIR)/datasets/*
+	rm -rf logs/*	
 	cd $(WAYEB_DIR) && sbt clean
 	cd $(JAVA_DIR) && mvn clean

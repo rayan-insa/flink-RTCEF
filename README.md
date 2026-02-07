@@ -187,17 +187,17 @@ The Flink Cluster UI should be available at <http://localhost:8081>. It is usefu
 make run
 ```
 
+> ***IMPORTANT:***: Full permissions are needed on the data subfolders.
+
 This command will:
 
 1. Check if everything is installed.
 2. Build Wayeb using SBT.
 3. Build the Flink App using Maven.
 4. Compile an automaton from a given pattern and learn a predictive model from the given sample maritime dataset
-5. Upload the Flink Job to the Cluster and run the Job
+5. Upload all Flink Jobs to the Cluster and run them
 
-> ***IMPORTANT:***: For now, this command is training a prediction model over sample maritime data and predicting over the SAME data. This is just for illustration purposes.
-
-> ***NOTE:***: To bypass re-building and re-training Wayeb each time when testing Java code only, use **make build-flink** followed by **make submit** to build only Flin Java code and submit it to the Cluster.
+> ***NOTE:***: To bypass re-building and re-training Wayeb each time when testing Java code only, use **make build-flink** followed by **make run-all-jobs** to build only Flin Java code and submit it to the Cluster.
 
 **4. Show forecast logs**
 
@@ -205,7 +205,13 @@ This command will:
 make logs
 ```
 
-**5. Stop everything**
+**5. Compute results**
+
+```bash
+make results
+```
+
+**6. Stop everything**
 
 ```bash
 make stop
@@ -290,5 +296,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 - The original RTCEF framework authors: Manolis Pitsikalis, Elias Alevizos, Nikos Giatrakos, and Alexander Artikis
-- The CREXDATA project (European Union's Horizon Europe Programme, grant agreement No 101092749)
 - INSA Lyon and the Data System Research teaching team

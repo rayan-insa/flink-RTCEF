@@ -21,7 +21,9 @@ RUN pip3 install apache-flink==1.17.2 \
     pandas==2.0.3 \
     scikit-optimize==0.9.0 \
     kafka-python==2.0.2 \
-    pydantic==2.5.3
+    pydantic==2.5.3 \
+    pandas \
+    matplotlib
 
 # Copy internal libraries if needed (optional, for now we mount them)
 WORKDIR /opt/flink

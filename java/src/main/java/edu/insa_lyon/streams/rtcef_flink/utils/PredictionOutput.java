@@ -33,7 +33,7 @@ public class PredictionOutput {
 
     @Override
     public String toString() {
-        return String.format("PRED{ts=%d, key='%s', prob=%.2f, window=[+%d, +%d]}", 
-            timestamp, key, probability, startIn, endIn);
+        return String.format("PRED{ts=%d, key='%s', prob=%.2f, window=[+%d, +%d], positive=%b}", 
+            timestamp, key, probability, startIn, endIn, isPositive);
     }
 }

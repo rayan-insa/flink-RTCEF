@@ -10,7 +10,7 @@ import stream.source._
 import ui.ConfigUtils
 import utils.MathUtils.sampleUniform
 //import stream.domain.archived.MaritimePairedDomain
-import stream.domain.maritime.MaritimeLineParser
+import stream.domain.maritime.{MaritimeLineParser, MaritimeWAStreamSourceJSON}
 
 import scala.collection.mutable
 
@@ -44,6 +44,7 @@ object StreamFactory {
     domain match {
       case "json" => if (isKafka) KafkaStreamSource(kafkaConf, JsonLineParser) else JsonFileStreamSource(fn)
       case "maritime" => if (isKafka) KafkaStreamSource(kafkaConf, MaritimeLineParser) else CSVStreamSource(fn, MaritimeLineParser)
+      case "maritimejson" => MaritimeWAStreamSourceJSON(fn)
       case "csv" => CSVStreamSource(fn)
       case "stock" => CSVStreamSource(fn, StockLineParser)
       case "homes" => CSVStreamSource(fn, HomesLineParser)

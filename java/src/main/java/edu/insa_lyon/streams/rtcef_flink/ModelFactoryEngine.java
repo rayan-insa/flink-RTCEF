@@ -69,7 +69,7 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
     private final OutputTag<String> assemblyTag;
     
     // Minimum Data threshold for training (Phase 2)
-    private static final int MIN_DATA_THRESHOLD = 1000;
+    private static final int MIN_DATA_THRESHOLD = 50;
 
     public ModelFactoryEngine(OutputTag<String> assemblyTag, int horizon, double runConfidenceThreshold, int maxSpread) {
         this.assemblyTag = assemblyTag;
@@ -89,7 +89,19 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
      * Extract a resource from the JAR to a temporary file.
      */
     private String extractResource(String resourcePath) throws IOException {
+        java.io.File file = new java.io.File(resourcePath);
+        if (file.exists() && file.isFile()) {
+            LOG.info("Resource found on filesystem: {}", resourcePath);
+            return resourcePath; // Return the absolute path directly, no extraction needed
+        }
+
         InputStream is = getClass().getResourceAsStream(resourcePath);
+        if (is == null) {
+            if (resourcePath.startsWith("/")) {
+                 is = getClass().getResourceAsStream(resourcePath.substring(1));
+            }
+        }
+        
         if (is == null) {
             throw new IOException("Resource not found in JAR: " + resourcePath);
         }
@@ -200,8 +212,8 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
         // Initialize optimization params list
         optModelParams = new ArrayList<>();
         
-        extractedPatternPath = extractResource("/patterns/enteringArea/pattern.sre");
-        extractedDeclarationsPath = extractResource("/patterns/enteringArea/declarations.sre");
+        extractedPatternPath = extractResource("/opt/flink/data/pattern.sre");
+        extractedDeclarationsPath = extractResource("/opt/flink/data/declarations.sre");
     }
 
     /**
@@ -542,7 +554,7 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
             // 3. Update state with the new path
             currentAssembledDatasetState.update(newAssembledPath);
             
-            // LOG.info("Dataset updated to version {}", version);
+            LOG.info("Dataset updated to version {}", version);
 
             // 4. Emit Assembly Report (ACK) for Collector
             // Structure matches Python's expected "assembly_reports"
@@ -611,8 +623,8 @@ public class ModelFactoryEngine extends CoProcessFunction<String, String, String
                     }
                 }
                 
-                String type = "AIS"; // Default type or extract from JSON if available?
-                // For now, keep "AIS" or make it generic "EVENT"
+                String type = "SampledCritical"; // Default type or extract from JSON if available?
+                // For now, keep "SampledCritical" or make it generic "EVENT"
                 if (root.has("type")) type = root.get("type").asText();
 
                 // Use Bridge to create Scala Case Class
